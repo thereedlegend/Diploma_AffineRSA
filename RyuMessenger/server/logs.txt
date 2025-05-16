@@ -12,3 +12,5 @@
 2025-05-16 15:06:44,600 INFO: Ћоги сохран€ютс€ в файл: H:\ProjectsVSCode\Diploma_AffineRSA\RyuMessenger\server\logs.txt [in H:\ProjectsVSCode\Diploma_AffineRSA\RyuMessenger\server\app.py:238]
 2025-05-16 15:07:29,098 INFO: User sasa (tag: sasa) registered successfully with ID: 1 [in H:\ProjectsVSCode\Diploma_AffineRSA\RyuMessenger\server\services\user_service.py:93]
 2025-05-16 15:07:56,833 INFO: JWT token generated for user_id: 1 [in H:\ProjectsVSCode\Diploma_AffineRSA\RyuMessenger\server\api\routes.py:145]
+2025-05-16 15:38:22,337 INFO: Cleanup timer stopped on application exit [in H:\ProjectsVSCode\Diploma_AffineRSA\RyuMessenger\server\app.py:246]
+2025-05-16 15:38:22,383 INFO: Cleanup timer stopped on application exit [in H:\ProjectsVSCode\Diploma_AffineRSA\RyuMessenger\server\app.py:246]
