@@ -64,6 +64,26 @@ def create_app(config_object='RyuMessenger.server.core.config'):
     app.config.from_object(config_object)
     # app.config.from_pyfile('config.py', silent=True) # Если есть config.py в instance folder
     
+    # Настройка кодировки и локали
+    import locale
+    import sys
+    if sys.platform == 'win32':
+        # На Windows указываем явно русскую локаль и UTF-8
+        try:
+            locale.setlocale(locale.LC_ALL, 'Russian_Russia.UTF-8')
+        except locale.Error:
+            try:
+                # Пробуем более общую локаль
+                locale.setlocale(locale.LC_ALL, 'Russian_Russia.1251')
+            except locale.Error:
+                app.logger.warning("Не удалось установить русскую локаль")
+    else:
+        # На Unix-подобных системах
+        try:
+            locale.setlocale(locale.LC_ALL, 'ru_RU.UTF-8')
+        except locale.Error:
+            app.logger.warning("Не удалось установить русскую локаль")
+    
     # Настройка логирования
     if not os.path.exists(os.path.dirname(LOG_PATH)):
         os.makedirs(os.path.dirname(LOG_PATH))
@@ -248,6 +268,21 @@ def create_app(config_object='RyuMessenger.server.core.config'):
 if __name__ == '__main__':
     # Это для запуска через `python app.py` (не рекомендуется для продакшена)
     # Используйте `flask run` или Gunicorn/uWSGI
+    
+    # Настройка консольного вывода
+    import sys
+    if sys.platform == 'win32':
+        # Для Windows устанавливаем кодировку консоли в UTF-8
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
+        # Дополнительно можно изменить кодовую страницу консоли Windows
+        try:
+            import subprocess
+            subprocess.run(['chcp', '65001'], shell=True, check=True)  # 65001 = UTF-8
+        except Exception as e:
+            print(f"Ошибка при изменении кодовой страницы консоли: {e}")
+    
     app = create_app()
     # Путь к ключам сервера относительно instance папки
     app.logger.info(f"Путь к instance: {app.instance_path}")

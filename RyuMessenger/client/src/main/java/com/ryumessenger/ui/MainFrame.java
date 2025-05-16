@@ -213,21 +213,41 @@ public class MainFrame extends JFrame implements ThemedComponent {
 
     private void loadMessagesForCurrentChat() {
         if (currentActiveChat != null && chatService != null && chatPanel != null) {
-            int prevCount = chatPanel.getDisplayedMessagesCount();
-            
-            if (showCryptoLog) {
-                CryptoLogWindow.log("Загрузка сообщений для чата: " + currentActiveChat.getDisplayName());
+            // Проверяем, отображается ли в панели чата тот же чат, что мы хотим обновить
+            // Если нет, то не делаем запрос
+            if (!chatPanel.isDisplayingChat(currentActiveChat)) {
+                return;
             }
             
-            chatService.getMessagesForChat(currentActiveChat.getId(), null, 100, 0, messages -> {
-                if (currentActiveChat != null && messages != null && chatPanel.isDisplayingChat(currentActiveChat)) {
-                    chatPanel.setMessages(messages);
+            // Получаем ID последнего сообщения из панели чата
+            String lastMessageId = chatPanel.getLastMessageId();
+            
+            // Если нет lastMessageId и уже есть сообщения, не делаем повторный запрос всех сообщений
+            if (lastMessageId == null && chatPanel.getDisplayedMessagesCount() > 0) {
+                return;
+            }
+            
+            if (showCryptoLog) {
+                CryptoLogWindow.log("Загрузка сообщений для чата: " + currentActiveChat.getDisplayName() + 
+                                   (lastMessageId != null ? " начиная с ID " + lastMessageId : ""));
+            }
+            
+            // Используем меньшее количество сообщений для обновления (10), чем для начальной загрузки (100)
+            int limit = (lastMessageId == null) ? 100 : 10;
+            
+            chatService.getMessagesForChat(currentActiveChat.getId(), lastMessageId, limit, 0, messages -> {
+                // Проверяем, что чат всё еще активен и есть новые сообщения
+                if (currentActiveChat != null && messages != null && !messages.isEmpty() && 
+                    chatPanel.isDisplayingChat(currentActiveChat)) {
+                    
+                    // Добавляем только новые сообщения к существующим, а не заменяем весь список
+                    chatPanel.addNewMessages(messages);
                     
                     if (showCryptoLog) {
-                        CryptoLogWindow.log("Загружено сообщений: " + messages.size());
+                        CryptoLogWindow.log("Загружено новых сообщений: " + messages.size());
                     }
                     
-                    if (messages.size() > prevCount) {
+                    if (messages.size() > 0) {
                         // Появились новые сообщения — обновляем список чатов
                         loadChatList();
                     }

@@ -91,13 +91,13 @@ public class ChatPanel extends JPanel implements ThemedComponent {
             }
         }); 
 
-        displayChat(null); 
+        displayChat(null);
+        
         themeManager.registerThemedComponent(this);
         applyTheme();
         
-        // Инициализация таймера обновления сообщений (каждые 3 секунды)
-        messageRefreshTimer = new Timer(3000, e -> refreshMessages());
-        messageRefreshTimer.start();
+        // Теперь обновление сообщений полностью управляется из MainFrame
+        // Таймер здесь не используется, чтобы избежать дублирования запросов
     }
 
     public void displayChat(Chat chat) {
@@ -130,9 +130,22 @@ public class ChatPanel extends JPanel implements ThemedComponent {
                 if (messages != null && isDisplayingChat(chat)) {
                     SwingUtilities.invokeLater(() -> {
                         setMessages(messages);
-                        // Обновляем ID последнего сообщения
-                        if (!messages.isEmpty()) {
-                            lastMessageId = messages.get(0).getId();
+                        // Обновляем ID последнего сообщения только если есть сообщения
+                        if (messages.size() > 0) {
+                            // Ищем сообщение с наибольшим ID (или временем отправки)
+                            Message newestMessage = null;
+                            long newestTimestamp = 0;
+                            
+                            for (Message msg : messages) {
+                                if (msg.getSentAt() > newestTimestamp) {
+                                    newestMessage = msg;
+                                    newestTimestamp = msg.getSentAt();
+                                }
+                            }
+                            
+                            if (newestMessage != null && newestMessage.getId() != null) {
+                                lastMessageId = newestMessage.getId();
+                            }
                         }
                     });
                 }
@@ -192,7 +205,26 @@ public class ChatPanel extends JPanel implements ThemedComponent {
     public void setMessages(List<Message> messages) {
         displayedMessages.clear();
         if (messages != null) {
+            // Сортируем сообщения по времени (от старых к новым)
+            messages.sort((m1, m2) -> Long.compare(m1.getSentAt(), m2.getSentAt()));
             displayedMessages.addAll(messages);
+            
+            // Находим самое новое сообщение для обновления lastMessageId
+            if (!messages.isEmpty()) {
+                Message newestMessage = null;
+                long newestTimestamp = 0;
+                
+                for (Message msg : messages) {
+                    if (msg.getSentAt() > newestTimestamp && msg.getId() != null) {
+                        newestMessage = msg;
+                        newestTimestamp = msg.getSentAt();
+                    }
+                }
+                
+                if (newestMessage != null) {
+                    lastMessageId = newestMessage.getId();
+                }
+            }
         }
         refreshMessagesDisplay();
     }
@@ -342,27 +374,60 @@ public class ChatPanel extends JPanel implements ThemedComponent {
                 true,
                 currentChat.getId()
         );
-        
+        optimisticMessage.setStatus(MessageStatus.SENDING);
         appendMessage(optimisticMessage);
         messageInput.setText("");
 
-        chatService.sendMessage(currentChat.getId(), text, sentMessage -> {
+        // Делаем локальную копию объекта currentChat,
+        // чтобы избежать проблем при переключении чатов во время отправки
+        final Chat targetChat = currentChat;
+        
+        chatService.sendMessage(targetChat.getId(), text, sentMessage -> {
             if (sentMessage != null && sentMessage.getId() != null) {
-                for (int i = 0; i < displayedMessages.size(); i++) {
-                    Message m = displayedMessages.get(i);
-                    if (m.getTempId() != null && m.getTempId().equals(optimisticMessage.getTempId())) {
-                        displayedMessages.set(i, sentMessage);
-                        break;
+                // Обновляем сообщение только если мы все еще в том же чате
+                if (isDisplayingChat(targetChat)) {
+                    boolean messageFound = false;
+                    for (int i = 0; i < displayedMessages.size(); i++) {
+                        Message m = displayedMessages.get(i);
+                        if (m.getTempId() != null && m.getTempId().equals(optimisticMessage.getTempId())) {
+                            displayedMessages.set(i, sentMessage);
+                            messageFound = true;
+                            
+                            // Обновляем lastMessageId, чтобы избежать дублирования в refreshMessages
+                            if (sentMessage.getId() != null) {
+                                lastMessageId = sentMessage.getId();
+                            }
+                            break;
+                        }
                     }
+                    
+                    if (!messageFound) {
+                        // Если по какой-то причине сообщение не найдено (редкий случай),
+                        // добавляем его и обновляем lastMessageId
+                        displayedMessages.add(sentMessage);
+                        lastMessageId = sentMessage.getId();
+                    }
+                    
+                    refreshMessagesDisplay();
                 }
-                optimisticMessage.setStatus(MessageStatus.SENT);
             } else {
-                optimisticMessage.setStatus(MessageStatus.FAILED);
-                if (sentMessage == null) {
-                    JOptionPane.showMessageDialog(this, "Ошибка отправки сообщения", "Ошибка", JOptionPane.ERROR_MESSAGE);
+                // Если произошла ошибка, но мы все еще в том же чате
+                if (isDisplayingChat(targetChat)) {
+                    for (int i = 0; i < displayedMessages.size(); i++) {
+                        Message m = displayedMessages.get(i);
+                        if (m.getTempId() != null && m.getTempId().equals(optimisticMessage.getTempId())) {
+                            m.setStatus(MessageStatus.FAILED);
+                            break;
+                        }
+                    }
+                    
+                    if (sentMessage == null) {
+                        JOptionPane.showMessageDialog(this, "Ошибка отправки сообщения", "Ошибка", JOptionPane.ERROR_MESSAGE);
+                    }
+                    
+                    refreshMessagesDisplay();
                 }
             }
-            refreshMessagesDisplay();
         });
     }
 
@@ -453,7 +518,7 @@ public class ChatPanel extends JPanel implements ThemedComponent {
     @Override
     public void removeNotify() {
         super.removeNotify();
-        // Останавливаем таймер при удалении панели
+        // Останавливаем таймер при удалении панели, если он был запущен
         if (messageRefreshTimer != null && messageRefreshTimer.isRunning()) {
             messageRefreshTimer.stop();
         }
@@ -461,7 +526,7 @@ public class ChatPanel extends JPanel implements ThemedComponent {
     }
 
     // Метод для обновления сообщений в текущем чате
-    private void refreshMessages() {
+    public void refreshMessages() {
         if (currentChat == null) return;
         
         String chatId = currentChat.getId();
@@ -471,10 +536,15 @@ public class ChatPanel extends JPanel implements ThemedComponent {
             if (messages != null && !messages.isEmpty() && isDisplayingChat(currentChat)) {
                 // Обрабатываем только если есть новые сообщения и мы все еще в том же чате
                 SwingUtilities.invokeLater(() -> {
-                    // Обновляем последний ID для следующего запроса
+                    // Обновляем ID последнего сообщения только один раз - для самого последнего сообщения
                     if (!messages.isEmpty()) {
+                        // Получаем самое новое сообщение (с наибольшим ID)
+                        String newestMessageId = null;
+                        long newestTimestamp = 0;
+                        
+                        // Перебираем полученные сообщения и добавляем только те, которых ещё нет
                         for (Message msg : messages) {
-                            // Ищем, есть ли сообщение с таким ID
+                            // Проверяем, есть ли уже такое сообщение
                             boolean exists = false;
                             for (Message existingMsg : displayedMessages) {
                                 if (existingMsg.getId() != null && existingMsg.getId().equals(msg.getId())) {
@@ -486,13 +556,114 @@ public class ChatPanel extends JPanel implements ThemedComponent {
                             // Если сообщения нет в списке, добавляем его
                             if (!exists) {
                                 displayedMessages.add(msg);
-                                lastMessageId = msg.getId(); // Обновляем ID последнего сообщения
+                                
+                                // Проверяем, не является ли это сообщение более новым
+                                if (msg.getId() != null && msg.getSentAt() > newestTimestamp) {
+                                    newestMessageId = msg.getId();
+                                    newestTimestamp = msg.getSentAt();
+                                }
                             }
                         }
+                        
+                        // Обновляем lastMessageId только один раз для самого нового сообщения
+                        if (newestMessageId != null) {
+                            lastMessageId = newestMessageId;
+                        }
+                        
                         refreshMessagesDisplay();
                     }
                 });
             }
         });
+    }
+
+    /**
+     * Возвращает ID последнего известного сообщения в чате.
+     * @return ID последнего сообщения или null, если сообщений нет
+     */
+    public String getLastMessageId() {
+        return lastMessageId;
+    }
+    
+    /**
+     * Добавляет новые сообщения к существующим, избегая дубликатов.
+     * @param newMessages Список новых сообщений для добавления
+     */
+    public void addNewMessages(List<Message> newMessages) {
+        if (newMessages == null || newMessages.isEmpty()) {
+            return;
+        }
+        
+        // Сортируем новые сообщения по времени
+        newMessages.sort((m1, m2) -> Long.compare(m1.getSentAt(), m2.getSentAt()));
+        
+        // Отслеживаем самое новое сообщение для обновления lastMessageId
+        Message newestMessage = null;
+        long newestTimestamp = 0;
+        boolean hasNewMessages = false;
+        
+        // Добавляем только те сообщения, которых еще нет
+        for (Message newMsg : newMessages) {
+            // Пропускаем сообщения с null id, если они не от текущего пользователя
+            if (newMsg.getId() == null && !newMsg.isFromCurrentUser()) {
+                continue;
+            }
+            
+            boolean exists = false;
+            // Проверяем, есть ли такое сообщение уже в списке
+            for (Message existingMsg : displayedMessages) {
+                // Проверка по ID (если есть)
+                if (existingMsg.getId() != null && newMsg.getId() != null && 
+                    existingMsg.getId().equals(newMsg.getId())) {
+                    exists = true;
+                    break;
+                }
+                
+                // Проверка по временному ID (для сообщений отправленных, но еще не получивших ID с сервера)
+                if (existingMsg.getTempId() != null && newMsg.getTempId() != null && 
+                    existingMsg.getTempId().equals(newMsg.getTempId())) {
+                    // Если сообщение уже есть, но получило ID с сервера, обновляем локальное сообщение
+                    if (newMsg.getId() != null && existingMsg.getId() == null) {
+                        existingMsg.setId(newMsg.getId());
+                        existingMsg.setStatus(newMsg.getStatus());
+                    }
+                    exists = true;
+                    break;
+                }
+                
+                // Дополнительная проверка на дубликат по содержимому и времени
+                // Если тексты и время отправки близки (в пределах 2 секунд), считаем дубликатом
+                if (existingMsg.getText() != null && newMsg.getText() != null && 
+                    existingMsg.getText().equals(newMsg.getText()) &&
+                    Math.abs(existingMsg.getSentAt() - newMsg.getSentAt()) < 2000) {
+                    exists = true;
+                    break;
+                }
+            }
+            
+            // Если сообщения нет, добавляем его
+            if (!exists) {
+                displayedMessages.add(newMsg);
+                hasNewMessages = true;
+                
+                // Обновляем информацию о самом новом сообщении
+                if (newMsg.getSentAt() > newestTimestamp && newMsg.getId() != null) {
+                    newestMessage = newMsg;
+                    newestTimestamp = newMsg.getSentAt();
+                }
+            }
+        }
+        
+        // Обновляем lastMessageId, если найдено новое сообщение
+        if (newestMessage != null) {
+            lastMessageId = newestMessage.getId();
+        }
+        
+        // Обновляем отображение, только если были добавлены новые сообщения
+        if (hasNewMessages) {
+            // Сортируем все сообщения для правильного отображения
+            displayedMessages.sort((m1, m2) -> Long.compare(m1.getSentAt(), m2.getSentAt()));
+            refreshMessagesDisplay();
+        }
     }
 } 

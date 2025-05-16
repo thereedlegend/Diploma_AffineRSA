@@ -6,105 +6,322 @@ import java.io.IOException;
 import java.math.BigInteger;
 import java.nio.file.Files;
 import java.nio.file.Paths;
-import java.util.HashMap;
-import java.util.Map;
+import java.util.Base64;
 
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 public class KeyManager {
     private RSA.KeyPair clientRsaKeyPair;
-    private Map<String, AffineCipher> clientAffineCiphers; // Ключ - язык ("ru", "en")
+    private AffineCipher clientAffineCipher; // Общий афинный шифр (вместо разных для языков)
     private String keysDirectoryPath;
     private String keysFilePath;
+    private String userDataDirectoryPath;
+    private String rsaPublicPemPath;
+    private String rsaPrivatePemPath;
 
     // Поля для хранения публичного ключа RSA сервера и его аффинных параметров
     private RSA.PublicKey serverRsaPublicKey;
-    private JSONObject serverAffineParamsJson; // Храним JSON объект как есть или парсим в Map<String, Map<String, Integer>>
+    private JSONObject serverAffineParamsJson;
+
+    // Используем DiffieHellman для обмена ключами
+    private DiffieHellman diffieHellman;
 
     public KeyManager(String baseDir) {
         this.keysDirectoryPath = Paths.get(baseDir, CryptoConstants.KEYS_DIR_NAME).toString();
         this.keysFilePath = Paths.get(this.keysDirectoryPath, CryptoConstants.CLIENT_KEYS_FILE_NAME).toString();
-        this.clientAffineCiphers = new HashMap<>();
+        
+        // Новая директория user_data для PEM-файлов
+        this.userDataDirectoryPath = Paths.get(baseDir, "user_data").toString();
+        this.rsaPublicPemPath = Paths.get(this.userDataDirectoryPath, "user_RSA_public.pem").toString();
+        this.rsaPrivatePemPath = Paths.get(this.userDataDirectoryPath, "user_RSA_private.pem").toString();
+        
+        this.diffieHellman = new DiffieHellman(); // Инициализируем DH с параметрами по умолчанию
         loadOrGenerateKeys();
     }
 
     private void loadOrGenerateKeys() {
-        File keysDir = new File(keysDirectoryPath);
-        if (!keysDir.exists()) {
-            if (!keysDir.mkdirs()) {
-                System.err.println("Ошибка: Не удалось создать директорию ключей: " + keysDirectoryPath);
-                // В UI нужно будет показать ошибку и, возможно, закрыть приложение
-                generateNewKeys(); // Попытаться сгенерировать в текущей директории как fallback? Или просто ошибка.
-                return;
+        // Создаем директорию user_data, если ее нет
+        File userDataDir = new File(userDataDirectoryPath);
+        if (!userDataDir.exists()) {
+            if (!userDataDir.mkdirs()) {
+                System.err.println("Ошибка: Не удалось создать директорию user_data: " + userDataDirectoryPath);
             }
         }
-
-        File keysFile = new File(keysFilePath);
-        if (keysFile.exists()) {
-            try {
-                String content = new String(Files.readAllBytes(Paths.get(keysFilePath)));
-                JSONObject json = new JSONObject(content);
-
-                JSONObject rsaPubKeyJson = json.getJSONObject("rsa_public_key");
-                BigInteger n_pub = new BigInteger(rsaPubKeyJson.getString("n"));
-                BigInteger e_pub = new BigInteger(rsaPubKeyJson.getString("e"));
-                RSA.PublicKey publicKey = new RSA.PublicKey(n_pub, e_pub);
-
-                JSONObject rsaPrivKeyJson = json.getJSONObject("rsa_private_key");
-                BigInteger n_priv = new BigInteger(rsaPrivKeyJson.getString("n"));
-                BigInteger d_priv = new BigInteger(rsaPrivKeyJson.getString("d"));
-                RSA.PrivateKey privateKey = new RSA.PrivateKey(n_priv, d_priv);
-                
-                if (!n_pub.equals(n_priv)) {
-                    throw new JSONException("RSA public and private key N mismatch.");
+        
+        // Сначала пытаемся загрузить ключи из PEM-файлов
+        if (tryLoadKeysFromPem()) {
+            System.out.println("Ключи RSA успешно загружены из PEM-файлов.");
+        } else {
+            // Если не получилось, пробуем загрузить из старого формата JSON
+            File keysDir = new File(keysDirectoryPath);
+            if (!keysDir.exists()) {
+                if (!keysDir.mkdirs()) {
+                    System.err.println("Ошибка: Не удалось создать директорию ключей: " + keysDirectoryPath);
+                    generateNewKeys(); // Генерируем новые ключи
+                    return;
                 }
-                this.clientRsaKeyPair = new RSA.KeyPair(publicKey, privateKey);
+            }
 
-                JSONObject affineParamsJsonOuter = json.getJSONObject("affine_params");
-                for (String langKey : affineParamsJsonOuter.keySet()) {
-                    JSONObject params = affineParamsJsonOuter.getJSONObject(langKey);
-                    AffineCipher.Language affineLang;
-                    if ("ru".equalsIgnoreCase(langKey)) {
-                        affineLang = AffineCipher.Language.RUSSIAN;
-                    } else if ("en".equalsIgnoreCase(langKey)) {
-                        affineLang = AffineCipher.Language.ENGLISH;
-                    } else {
-                        System.err.println("Неизвестный язык в файле ключей: " + langKey + ". Пропускаю.");
-                        continue;
+            File keysFile = new File(keysFilePath);
+            if (keysFile.exists()) {
+                try {
+                    String content = new String(Files.readAllBytes(Paths.get(keysFilePath)));
+                    JSONObject json = new JSONObject(content);
+
+                    JSONObject rsaPubKeyJson = json.getJSONObject("rsa_public_key");
+                    BigInteger n_pub = new BigInteger(rsaPubKeyJson.getString("n"));
+                    BigInteger e_pub = new BigInteger(rsaPubKeyJson.getString("e"));
+                    RSA.PublicKey publicKey = new RSA.PublicKey(n_pub, e_pub);
+
+                    JSONObject rsaPrivKeyJson = json.getJSONObject("rsa_private_key");
+                    BigInteger n_priv = new BigInteger(rsaPrivKeyJson.getString("n"));
+                    BigInteger d_priv = new BigInteger(rsaPrivKeyJson.getString("d"));
+                    RSA.PrivateKey privateKey = new RSA.PrivateKey(n_priv, d_priv);
+                    
+                    if (!n_pub.equals(n_priv)) {
+                        throw new JSONException("RSA public and private key N mismatch.");
                     }
-                    AffineCipher cipher = new AffineCipher(params.getInt("a"), params.getInt("b"), affineLang);
-                    clientAffineCiphers.put(langKey, cipher);
-                }
-                System.out.println("Ключи клиента загружены из: " + keysFilePath);
-                if (!clientAffineCiphers.containsKey("ru") || !clientAffineCiphers.containsKey("en")) {
-                    System.err.println("Внимание: отсутствуют аффинные ключи для одного или нескольких языков. Перегенерирую.");
-                    generateNewKeys(); // Если не все ключи на месте, лучше перегенерировать
-                }
+                    this.clientRsaKeyPair = new RSA.KeyPair(publicKey, privateKey);
 
-            } catch (IOException | JSONException | NumberFormatException | NullPointerException e) {
-                System.err.println("Ошибка при загрузке ключей клиента: " + e.getMessage() + ". Генерирую новые ключи.");
-                e.printStackTrace();
+                    // Загружаем параметры афинного шифра для ASCII
+                    JSONObject affineParamsJson = json.getJSONObject("affine_cipher");
+                    
+                    // Пытаемся загрузить массив коэффициентов b
+                    int[] bValues;
+                    if (affineParamsJson.has("b_values")) {
+                        JSONArray bValuesArray = affineParamsJson.getJSONArray("b_values");
+                        bValues = new int[bValuesArray.length()];
+                        for (int i = 0; i < bValuesArray.length(); i++) {
+                            bValues[i] = bValuesArray.getInt(i);
+                        }
+                    } else {
+                        // Для обратной совместимости - используем одно значение b для всех позиций
+                        int b = affineParamsJson.getInt("b");
+                        JSONArray aValuesArray = affineParamsJson.getJSONArray("a_values");
+                        bValues = new int[aValuesArray.length()];
+                        for (int i = 0; i < aValuesArray.length(); i++) {
+                            bValues[i] = b;
+                        }
+                    }
+                    
+                    // Загружаем массив коэффициентов a
+                    JSONArray aValuesArray = affineParamsJson.getJSONArray("a_values");
+                    int[] aValues = new int[aValuesArray.length()];
+                    for (int i = 0; i < aValuesArray.length(); i++) {
+                        aValues[i] = aValuesArray.getInt(i);
+                    }
+                    
+                    clientAffineCipher = new AffineCipher(aValues, bValues);
+                    
+                    System.out.println("Ключи клиента загружены из: " + keysFilePath);
+                    
+                    // Сохраняем ключи в PEM-формате для будущего использования
+                    saveToPem();
+
+                } catch (IOException | JSONException | NumberFormatException | NullPointerException e) {
+                    System.err.println("Ошибка при загрузке ключей клиента: " + e.getMessage() + ". Генерирую новые ключи.");
+                    e.printStackTrace();
+                    generateNewKeys();
+                }
+            } else {
+                System.out.println("Файл ключей клиента не найден. Генерирую новые ключи.");
                 generateNewKeys();
             }
-        } else {
-            System.out.println("Файл ключей клиента не найден. Генерирую новые ключи.");
-            generateNewKeys();
         }
+    }
+
+    /**
+     * Пытается загрузить ключи RSA из PEM-файлов
+     * @return true, если загрузка успешна, false в противном случае
+     */
+    private boolean tryLoadKeysFromPem() {
+        File publicKeyFile = new File(rsaPublicPemPath);
+        File privateKeyFile = new File(rsaPrivatePemPath);
+        
+        if (!publicKeyFile.exists() || !privateKeyFile.exists()) {
+            return false;
+        }
+        
+        try {
+            // Загрузка публичного ключа
+            String publicKeyPem = new String(Files.readAllBytes(publicKeyFile.toPath()));
+            RSA.PublicKey publicKey = parsePemPublicKey(publicKeyPem);
+            
+            // Загрузка приватного ключа
+            String privateKeyPem = new String(Files.readAllBytes(privateKeyFile.toPath()));
+            RSA.PrivateKey privateKey = parsePemPrivateKey(privateKeyPem);
+            
+            if (publicKey != null && privateKey != null) {
+                // Проверка, что ключи парные (имеют одинаковые модули)
+                if (publicKey.n.equals(privateKey.n)) {
+                    this.clientRsaKeyPair = new RSA.KeyPair(publicKey, privateKey);
+                    
+                    // Загрузили RSA ключи, теперь нужно загрузить параметры афинного шифра
+                    // Для этого все равно используем JSON-файл
+                    File keysFile = new File(keysFilePath);
+                    if (keysFile.exists()) {
+                        String content = new String(Files.readAllBytes(Paths.get(keysFilePath)));
+                        JSONObject json = new JSONObject(content);
+                        JSONObject affineParamsJson = json.getJSONObject("affine_cipher");
+                        
+                        // Пытаемся загрузить массив коэффициентов b
+                        int[] bValues;
+                        if (affineParamsJson.has("b_values")) {
+                            JSONArray bValuesArray = affineParamsJson.getJSONArray("b_values");
+                            bValues = new int[bValuesArray.length()];
+                            for (int i = 0; i < bValuesArray.length(); i++) {
+                                bValues[i] = bValuesArray.getInt(i);
+                            }
+                        } else {
+                            // Для обратной совместимости - используем одно значение b для всех позиций
+                            int b = affineParamsJson.getInt("b");
+                            JSONArray aValuesArray = affineParamsJson.getJSONArray("a_values");
+                            bValues = new int[aValuesArray.length()];
+                            for (int i = 0; i < aValuesArray.length(); i++) {
+                                bValues[i] = b;
+                            }
+                        }
+                        
+                        // Загружаем массив коэффициентов a
+                        JSONArray aValuesArray = affineParamsJson.getJSONArray("a_values");
+                        int[] aValues = new int[aValuesArray.length()];
+                        for (int i = 0; i < aValuesArray.length(); i++) {
+                            aValues[i] = aValuesArray.getInt(i);
+                        }
+                        
+                        clientAffineCipher = new AffineCipher(aValues, bValues);
+                    } else {
+                        // Если JSON-файл не найден, генерируем новый афинный шифр
+                        this.clientAffineCipher = AffineCipher.createWithRandomKeys(16);
+                        saveKeys(); // Сохраняем для будущего использования
+                    }
+                    
+                    return true;
+                }
+            }
+        } catch (IOException | JSONException e) {
+            System.err.println("Ошибка при загрузке ключей из PEM-файлов: " + e.getMessage());
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Парсит публичный ключ RSA из PEM-формата
+     */
+    private RSA.PublicKey parsePemPublicKey(String pemContent) {
+        try {
+            // Удаляем заголовок, подвал и все пробельные символы
+            String base64Content = pemContent
+                .replace("-----BEGIN PUBLIC KEY-----", "")
+                .replace("-----END PUBLIC KEY-----", "")
+                .replaceAll("\\s", "");
+            
+            // Декодируем Base64 в массив байтов
+            byte[] data = Base64.getDecoder().decode(base64Content);
+            
+            // Простой метод парсинга для нашего специального PEM-формата
+            // В реальном приложении нужно использовать библиотеку для ASN.1 DER-декодирования
+            String dataStr = new String(data);
+            String[] parts = dataStr.split("\\|");
+            
+            if (parts.length == 2) {
+                BigInteger n = new BigInteger(parts[0]);
+                BigInteger e = new BigInteger(parts[1]);
+                return new RSA.PublicKey(n, e);
+            }
+        } catch (Exception e) {
+            System.err.println("Ошибка при парсинге PEM-публичного ключа: " + e.getMessage());
+        }
+        return null;
+    }
+    
+    /**
+     * Парсит приватный ключ RSA из PEM-формата
+     */
+    private RSA.PrivateKey parsePemPrivateKey(String pemContent) {
+        try {
+            // Удаляем заголовок, подвал и все пробельные символы
+            String base64Content = pemContent
+                .replace("-----BEGIN PRIVATE KEY-----", "")
+                .replace("-----END PRIVATE KEY-----", "")
+                .replaceAll("\\s", "");
+            
+            // Декодируем Base64 в массив байтов
+            byte[] data = Base64.getDecoder().decode(base64Content);
+            
+            // Простой метод парсинга для нашего специального PEM-формата
+            String dataStr = new String(data);
+            String[] parts = dataStr.split("\\|");
+            
+            if (parts.length == 2) {
+                BigInteger n = new BigInteger(parts[0]);
+                BigInteger d = new BigInteger(parts[1]);
+                return new RSA.PrivateKey(n, d);
+            }
+        } catch (Exception e) {
+            System.err.println("Ошибка при парсинге PEM-приватного ключа: " + e.getMessage());
+        }
+        return null;
+    }
+    
+    /**
+     * Сохраняет RSA ключи в PEM-формате
+     */
+    private void saveToPem() {
+        if (clientRsaKeyPair == null) {
+            System.err.println("Нет RSA ключей для сохранения в PEM-формате.");
+            return;
+        }
+        
+        try {
+            // Сохраняем публичный ключ
+            String publicKeyData = clientRsaKeyPair.publicKey.n.toString() + "|" + clientRsaKeyPair.publicKey.e.toString();
+            String publicKeyBase64 = Base64.getEncoder().encodeToString(publicKeyData.getBytes());
+            String publicKeyPem = "-----BEGIN PUBLIC KEY-----\n" +
+                                 formatPem(publicKeyBase64) +
+                                 "-----END PUBLIC KEY-----\n";
+            
+            // Сохраняем приватный ключ
+            String privateKeyData = clientRsaKeyPair.privateKey.n.toString() + "|" + clientRsaKeyPair.privateKey.d.toString();
+            String privateKeyBase64 = Base64.getEncoder().encodeToString(privateKeyData.getBytes());
+            String privateKeyPem = "-----BEGIN PRIVATE KEY-----\n" +
+                                  formatPem(privateKeyBase64) +
+                                  "-----END PRIVATE KEY-----\n";
+            
+            // Записываем файлы
+            Files.write(Paths.get(rsaPublicPemPath), publicKeyPem.getBytes());
+            Files.write(Paths.get(rsaPrivatePemPath), privateKeyPem.getBytes());
+            
+            System.out.println("RSA ключи сохранены в PEM-формате: " + rsaPublicPemPath + ", " + rsaPrivatePemPath);
+        } catch (IOException e) {
+            System.err.println("Ошибка при сохранении RSA ключей в PEM-формате: " + e.getMessage());
+        }
+    }
+    
+    /**
+     * Форматирует Base64-строку для PEM (добавляет переносы строк)
+     */
+    private String formatPem(String base64) {
+        StringBuilder formatted = new StringBuilder();
+        for (int i = 0; i < base64.length(); i += 64) {
+            int endIndex = Math.min(i + 64, base64.length());
+            formatted.append(base64.substring(i, endIndex)).append("\n");
+        }
+        return formatted.toString();
     }
 
     private void generateNewKeys() {
         RSA rsa = new RSA();
         this.clientRsaKeyPair = rsa.generateKeys(CryptoConstants.RSA_KEY_SIZE_BITS);
 
-        this.clientAffineCiphers.clear();
-        AffineCipher affineRu = AffineCipher.createWithRandomKeys(AffineCipher.Language.RUSSIAN);
-        this.clientAffineCiphers.put("ru", affineRu);
-
-        AffineCipher affineEn = AffineCipher.createWithRandomKeys(AffineCipher.Language.ENGLISH);
-        this.clientAffineCiphers.put("en", affineEn);
+        // Генерируем афинный шифр с ASCII алфавитом и 16 разными коэффициентами 'a' и 'b'
+        this.clientAffineCipher = AffineCipher.createWithRandomKeys(16);
 
         saveKeys();
+        saveToPem(); // Дополнительно сохраняем в PEM-формате
     }
 
     private void saveKeys() {
@@ -120,15 +337,31 @@ public class KeyManager {
             rsaPrivKeyJson.put("d", clientRsaKeyPair.privateKey.d.toString());
             json.put("rsa_private_key", rsaPrivKeyJson);
 
-            JSONObject affineParamsJsonOuter = new JSONObject();
-            for (Map.Entry<String, AffineCipher> entry : clientAffineCiphers.entrySet()) {
-                JSONObject params = new JSONObject();
-                params.put("a", entry.getValue().getKeyA());
-                params.put("b", entry.getValue().getKeyB());
-                params.put("m", entry.getValue().getModulus());
-                affineParamsJsonOuter.put(entry.getKey(), params);
+            // Сохраняем параметры афинного шифра
+            JSONObject affineParamsJson = new JSONObject();
+            
+            // Сохраняем массив коэффициентов a
+            JSONArray aValuesArray = new JSONArray();
+            for (int a : clientAffineCipher.getAValues()) {
+                aValuesArray.put(a);
             }
-            json.put("affine_params", affineParamsJsonOuter);
+            affineParamsJson.put("a_values", aValuesArray);
+            
+            // Сохраняем массив коэффициентов b
+            JSONArray bValuesArray = new JSONArray();
+            for (int b : clientAffineCipher.getBValues()) {
+                bValuesArray.put(b);
+            }
+            affineParamsJson.put("b_values", bValuesArray);
+            
+            // Для обратной совместимости также сохраняем первый коэффициент b
+            affineParamsJson.put("b", clientAffineCipher.getB());
+            
+            // Сохраняем количество разных a и модуль (ASCII)
+            affineParamsJson.put("key_length", clientAffineCipher.getKeyLength());
+            affineParamsJson.put("m", 256); // ASCII
+            
+            json.put("affine_cipher", affineParamsJson);
 
             try (FileWriter file = new FileWriter(keysFilePath)) {
                 file.write(json.toString(4)); // 4 for nice formatting
@@ -137,8 +370,6 @@ public class KeyManager {
             } catch (IOException e) {
                 System.err.println("Error saving client keys: " + e.getMessage());
                 e.printStackTrace();
-                // Что делать, если сохранить не удалось? Возможно, работать без сохранения,
-                // но тогда при следующем запуске ключи будут новые.
             }
         } catch (JSONException e) {
             System.err.println("Error constructing JSON for keys: " + e.getMessage());
@@ -158,12 +389,15 @@ public class KeyManager {
         return clientRsaKeyPair;
     }
 
-    public AffineCipher getAffineCipher(String lang) {
-        return clientAffineCiphers.get(lang.toLowerCase());
+    public AffineCipher getAffineCipher() {
+        return clientAffineCipher;
     }
     
-    public Map<String, AffineCipher> getAllAffineCiphers() {
-        return clientAffineCiphers;
+    /**
+     * Для обратной совместимости со старым кодом, который использовал языковые шифры
+     */
+    public AffineCipher getAffineCipher(String lang) {
+        return clientAffineCipher; // Теперь возвращаем один универсальный шифр независимо от языка
     }
 
     public void setServerRsaPublicKey(String nStr, String eStr) {
@@ -184,18 +418,6 @@ public class KeyManager {
 
     public void setServerAffineParams(JSONObject affineParamsJson) {
         this.serverAffineParamsJson = affineParamsJson;
-        // Здесь можно добавить логику для парсинга affineParamsJson в более удобную структуру,
-        // например, Map<String, Map<String, Integer>> для каждого языка.
-        // Пример:
-        // serverAffineParams = new HashMap<>();
-        // for (String lang : affineParamsJson.keySet()) {
-        //     JSONObject params = affineParamsJson.getJSONObject(lang);
-        //     Map<String, Integer> langParams = new HashMap<>();
-        //     langParams.put("a", params.getInt("a"));
-        //     langParams.put("b", params.getInt("b"));
-        //     langParams.put("m", params.getInt("m"));
-        //     serverAffineParams.put(lang, langParams);
-        // }
         System.out.println("KeyManager: Аффинные параметры сервера установлены: " + affineParamsJson.toString());
     }
 
@@ -205,5 +427,35 @@ public class KeyManager {
 
     public String getKeysDirectoryPath() {
         return keysDirectoryPath;
+    }
+    
+    /**
+     * Возвращает путь к директории user_data
+     */
+    public String getUserDataDirectoryPath() {
+        return userDataDirectoryPath;
+    }
+    
+    /**
+     * Возвращает открытый ключ Диффи-Хеллмана для обмена с сервером
+     */
+    public BigInteger getDiffieHellmanPublicKey() {
+        return diffieHellman.getPublicKey();
+    }
+    
+    /**
+     * Вычисляет общий секрет Диффи-Хеллмана на основе открытого ключа сервера
+     * @param serverPublicKey Открытый ключ сервера
+     * @return AffineCipher, созданный из общего секрета
+     */
+    public AffineCipher computeSharedAffineCipher(BigInteger serverPublicKey, int keyLength) {
+        try {
+            BigInteger sharedSecret = diffieHellman.computeSharedSecret(serverPublicKey);
+            return DiffieHellman.createAffineCipher(sharedSecret, keyLength);
+        } catch (Exception e) {
+            System.err.println("Ошибка при вычислении общего секрета Диффи-Хеллмана: " + e.getMessage());
+            // Возвращаем локальный афинный шифр в случае ошибки
+            return clientAffineCipher;
+        }
     }
 } 

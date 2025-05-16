@@ -2,101 +2,195 @@ package com.ryumessenger.crypto;
 
 public class AffineCipher {
 
-    // Совместимые с сервером алфавиты (SUPPORT_CHARS_RU и SUPPORT_CHARS_EN)
-    private static final String ALPHABET_RU = "абвгдежзийклмнопрстуфхцчшщъыьэюяАБВГДЕЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ0123456789!@#$%^&*()_+-=[]{}|;':,.\\/<>? ";
-    private static final String ALPHABET_EN = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*()_+-=[]{}|;':,.\\/<>? ";
-
-    // Enum для языка
-    public enum Language {
-        RUSSIAN, ENGLISH
-    }
-
-    // Поля экземпляра (final, инициализируются в конструкторе)
-    private final int a;
-    private final int b;
-    private final int aInverse;
-    private final Language language;
-    public final String alphabet; // Актуальный алфавит для этого экземпляра
-    public final int m;           // Актуальный модуль (размер алфавита)
-
+    // ASCII алфавит (от 0 до 255) вместо конкретных языков
+    private static final int ASCII_SIZE = 256;
+    
+    // Массив допустимых значений для коэффициента a (взаимно простые с 256)
+    private static final int[] VALID_A_VALUES = generateValidAValues(ASCII_SIZE);
+    
+    // Поля для хранения ключей
+    private final int[] aValues; // Массив коэффициентов a для разных позиций
+    private final int[] bValues; // Массив коэффициентов b для разных позиций
+    
     /**
-     * Основной конструктор, принимающий ключи и язык.
-     * Вычисляет обратный элемент для 'a'.
-     * @param a Ключ 'a', должен быть взаимно прост с размером алфавита m.
-     * @param b Ключ 'b'.
-     * @param language Язык (для выбора алфавита).
+     * Конструктор с указанием массивов коэффициентов a и b
+     * @param aValues Массив коэффициентов a для разных позиций
+     * @param bValues Массив коэффициентов b для разных позиций
      */
-    public AffineCipher(int a, int b, Language language) {
-        this.language = language;
-        AlphabetInfo info = getAlphabetAndModulus(language); // Получаем алфавит и модуль
-        this.alphabet = info.alphabet;
-        this.m = info.m;
-
-        if (!isCoprime(a, this.m)) {
-            throw new IllegalArgumentException("Key 'a' (" + a + ") must be coprime with alphabet size (" + this.m + ") for language " + language);
+    public AffineCipher(int[] aValues, int[] bValues) {
+        // Проверка валидности массива aValues
+        this.aValues = new int[aValues.length];
+        for (int i = 0; i < aValues.length; i++) {
+            if (!isCoprime(aValues[i], ASCII_SIZE)) {
+                throw new IllegalArgumentException("Key 'a' at position " + i + " (" + aValues[i] + 
+                    ") must be coprime with ASCII_SIZE (" + ASCII_SIZE + ")");
+            }
+            this.aValues[i] = aValues[i];
         }
-        this.a = a;
-        // Ключ b может быть любым, но приведем его по модулю m для каноничности
-        this.b = Math.floorMod(b, this.m); 
         
-        // Вычисляем и сохраняем обратное к 'a' по модулю m
-        this.aInverse = modInverse(a, this.m);
+        // Ключи b могут быть любыми, но приведем их по модулю m для каноничности
+        this.bValues = new int[bValues.length];
+        for (int i = 0; i < bValues.length; i++) {
+            this.bValues[i] = Math.floorMod(bValues[i], ASCII_SIZE);
+        }
     }
-
+    
     /**
-     * Статический фабричный метод для создания шифра со случайными ключами.
-     * @param language Язык.
-     * @return Новый экземпляр AffineCipher со случайными допустимыми ключами.
+     * Конструктор с указанием индексов в массиве VALID_A_VALUES и значений b
+     * @param aIndices Массив индексов для выбора значений из VALID_A_VALUES
+     * @param bValues Массив значений b
      */
-    public static AffineCipher createWithRandomKeys(Language language) {
-        AlphabetInfo info = getAlphabetAndModulus(language);
-        int m = info.m;
+    public static AffineCipher fromIndices(int[] aIndices, int[] bValues) {
+        // Преобразуем индексы в значения a
+        int[] aValues = new int[aIndices.length];
+        for (int i = 0; i < aIndices.length; i++) {
+            int index = Math.floorMod(aIndices[i], VALID_A_VALUES.length);
+            aValues[i] = VALID_A_VALUES[index];
+        }
+        
+        // Преобразуем значения b по модулю ASCII_SIZE
+        int[] canonicalBValues = new int[bValues.length];
+        for (int i = 0; i < bValues.length; i++) {
+            canonicalBValues[i] = Math.floorMod(bValues[i], ASCII_SIZE);
+        }
+        
+        return new AffineCipher(aValues, canonicalBValues);
+    }
+    
+    /**
+     * Конструктор обратной совместимости с одним коэффициентом b
+     * @param aValues Массив коэффициентов a
+     * @param b Одно значение b, которое будет использоваться для всех позиций
+     */
+    public AffineCipher(int[] aValues, int b) {
+        // Создаем массив b той же длины, что и a, заполненный одним значением
+        int[] bValues = new int[aValues.length];
+        for (int i = 0; i < aValues.length; i++) {
+            bValues[i] = b;
+        }
+        
+        // Используем основной конструктор
+        // Проверка валидности массива aValues
+        this.aValues = new int[aValues.length];
+        for (int i = 0; i < aValues.length; i++) {
+            if (!isCoprime(aValues[i], ASCII_SIZE)) {
+                throw new IllegalArgumentException("Key 'a' at position " + i + " (" + aValues[i] + 
+                    ") must be coprime with ASCII_SIZE (" + ASCII_SIZE + ")");
+            }
+            this.aValues[i] = aValues[i];
+        }
+        
+        // Ключи b могут быть любыми, но приведем их по модулю m для каноничности
+        this.bValues = bValues;
+    }
+    
+    /**
+     * Простой конструктор с одним коэффициентом a и b для всех символов (для обратной совместимости)
+     * @param a Коэффициент a
+     * @param b Смещение (коэффициент b)
+     */
+    public AffineCipher(int a, int b) {
+        if (!isCoprime(a, ASCII_SIZE)) {
+            throw new IllegalArgumentException("Key 'a' (" + a + 
+                ") must be coprime with ASCII_SIZE (" + ASCII_SIZE + ")");
+        }
+        
+        this.aValues = new int[1]; // Один элемент для всех позиций
+        this.aValues[0] = a;
+        
+        this.bValues = new int[1]; // Один элемент для всех позиций
+        this.bValues[0] = Math.floorMod(b, ASCII_SIZE);
+    }
+    
+    /**
+     * Генерирует статический массив допустимых значений a (взаимно простых с m)
+     */
+    private static int[] generateValidAValues(int m) {
+        // Подсчет взаимно простых с m чисел
+        int count = 0;
+        for (int i = 1; i < m; i++) {
+            if (gcd(i, m) == 1) {
+                count++;
+            }
+        }
+        
+        // Создание и заполнение массива
+        int[] validValues = new int[count];
+        int index = 0;
+        for (int i = 1; i < m; i++) {
+            if (gcd(i, m) == 1) {
+                validValues[index++] = i;
+            }
+        }
+        
+        return validValues;
+    }
+    
+    /**
+     * Получение массива допустимых значений a
+     */
+    public static int[] getValidAValues() {
+        return VALID_A_VALUES.clone(); // Возвращаем копию для безопасности
+    }
+    
+    /**
+     * Создает AffineCipher со случайными коэффициентами a и b
+     * @param keyLength Длина ключа (количество разных коэффициентов)
+     * @return Новый экземпляр AffineCipher
+     */
+    public static AffineCipher createWithRandomKeys(int keyLength) {
         java.util.Random random = new java.util.Random();
-        int randomA, randomB;
-        // Генерируем 'a' взаимно простое с m
-        do {
-            randomA = random.nextInt(m - 1) + 1; // a > 0
-        } while (!isCoprime(randomA, m));
-        // 'b' может быть любым от 0 до m-1
-        randomB = random.nextInt(m);
-        // Проверка (дополнительно, для отладки)
-        if (!isCoprime(randomA, m)) {
-            throw new IllegalStateException("Генерация некорректного ключа a для аффинного шифра: a=" + randomA + ", m=" + m);
+        
+        // Генерация случайных индексов для выбора значений a
+        int[] aIndices = new int[keyLength];
+        for (int i = 0; i < keyLength; i++) {
+            aIndices[i] = random.nextInt(VALID_A_VALUES.length);
         }
-        System.out.println("Generated Affine keys for " + language + ": a=" + randomA + ", b=" + randomB + ", m=" + m);
-        return new AffineCipher(randomA, randomB, language);
-    }
-
-    // --- Геттеры для ключей и языка ---
-    public int getKeyA() { return a; }
-    public int getKeyB() { return b; }
-    public Language getLanguage() { return language; }
-    public int getModulus() { return m; } // Геттер для модуля
-
-
-    // --- Вспомогательные статические методы ---
-
-    // Внутренний класс для хранения информации об алфавите
-    public static class AlphabetInfo {
-        final String alphabet;
-        final int m;
-        AlphabetInfo(String alphabet, int m) { this.alphabet = alphabet; this.m = m; }
-    }
-
-    // Метод для получения алфавита и модуля по языку
-    public static AlphabetInfo getAlphabetAndModulus(Language lang) {
-        switch (lang) {
-            case RUSSIAN:
-                return new AlphabetInfo(ALPHABET_RU, ALPHABET_RU.length());
-            case ENGLISH:
-                return new AlphabetInfo(ALPHABET_EN, ALPHABET_EN.length());
-            default:
-                 // Эта ветка не должна достигаться, если используются только значения enum
-                throw new IllegalArgumentException("Unsupported language specified: " + lang);
+        
+        // Генерация случайных значений b
+        int[] bValues = new int[keyLength];
+        for (int i = 0; i < keyLength; i++) {
+            bValues[i] = random.nextInt(ASCII_SIZE);
         }
+        
+        return fromIndices(aIndices, bValues);
     }
-
-    // Набольший общий делитель (алгоритм Евклида)
+    
+    /**
+     * Возвращает коэффициент a для указанной позиции
+     * @param position Позиция символа
+     * @return Коэффициент a
+     */
+    public int getAForPosition(int position) {
+        // Циклически используем значения из массива aValues
+        return aValues[position % aValues.length];
+    }
+    
+    /**
+     * Возвращает коэффициент b для указанной позиции
+     * @param position Позиция символа
+     * @return Коэффициент b
+     */
+    public int getBForPosition(int position) {
+        // Циклически используем значения из массива bValues
+        return bValues[position % bValues.length];
+    }
+    
+    /**
+     * Возвращает обратный элемент к a для указанной позиции
+     * @param position Позиция символа
+     * @return Обратный элемент a^-1 mod m
+     */
+    public int getAInverseForPosition(int position) {
+        int a = getAForPosition(position);
+        return modInverse(a, ASCII_SIZE);
+    }
+    
+    // Вспомогательные статические методы
+    
+    /**
+     * Наибольший общий делитель (алгоритм Евклида)
+     */
     public static int gcd(int a, int b) {
         while (b != 0) {
             int temp = b;
@@ -105,89 +199,139 @@ public class AffineCipher {
         }
         return Math.abs(a); // НОД всегда положительный
     }
-
-    // Поиск мультипликативного обратного a^-1 mod m (расширенный алгоритм Евклида)
-    // Возвращает x, такой что (a*x) % m == 1
-     public static int modInverse(int a, int m) {
-         a = Math.floorMod(a, m); // Приводим a по модулю m
-         if (a == 0 && m == 1) return 0; // Особый случай
-
-         int m0 = m;
-         int y = 0, x = 1;
-
-         if (m == 1) return 0;
-
-         while (a > 1) {
-             if (m == 0) throw new ArithmeticException("Modular inverse does not exist (a and m are not coprime, gcd != 1)");
-             // q - частное
-             int q = a / m;
-             int t = m;
-
-             // m - остаток от деления a на m
-             m = a % m;
-             a = t;
-             t = y;
-
-             // Обновляем y и x
-             y = x - q * y;
-             x = t;
-         }
-
-         // Приводим x к положительному значению в диапазоне [0, m0-1]
-         if (x < 0) x = x + m0;
-         
-         // Проверка, что обратное найдено корректно (на всякий случай)
-          if (gcd(Math.floorMod(a, m0), m0) != 1 && m0 != 1) { // a теперь содержит gcd(изначальные a, m)
-               throw new ArithmeticException("Modular inverse does not exist (a and m are not coprime, gcd != 1)");
-          }
-
-         return x;
-     }
-
-
-    // Проверка на взаимную простоту
+    
+    /**
+     * Проверка на взаимную простоту
+     */
     public static boolean isCoprime(int a, int m) {
-         return gcd(a, m) == 1;
+        return gcd(a, m) == 1;
     }
-
-    // --- Методы шифрования/дешифрования ---
-
+    
+    /**
+     * Поиск мультипликативного обратного a^-1 mod m (расширенный алгоритм Евклида)
+     */
+    public static int modInverse(int a, int m) {
+        a = Math.floorMod(a, m); // Приводим a по модулю m
+        if (a == 0 && m == 1) return 0; // Особый случай
+        
+        int m0 = m;
+        int y = 0, x = 1;
+        
+        if (m == 1) return 0;
+        
+        while (a > 1) {
+            if (m == 0) 
+                throw new ArithmeticException("Modular inverse does not exist (a and m are not coprime, gcd != 1)");
+            // q - частное
+            int q = a / m;
+            int t = m;
+            
+            // m - остаток от деления a на m
+            m = a % m;
+            a = t;
+            t = y;
+            
+            // Обновляем y и x
+            y = x - q * y;
+            x = t;
+        }
+        
+        // Приводим x к положительному значению в диапазоне [0, m0-1]
+        if (x < 0) x = x + m0;
+        
+        // Проверка, что обратное найдено корректно
+        if (gcd(Math.floorMod(a, m0), m0) != 1 && m0 != 1) {
+            throw new ArithmeticException("Modular inverse does not exist (a and m are not coprime, gcd != 1)");
+        }
+        
+        return x;
+    }
+    
+    // Методы шифрования/дешифрования
+    
+    /**
+     * Шифрует строку, используя ASCII и коэффициенты a и b для разных позиций
+     * @param plaintext Исходный текст
+     * @return Зашифрованный текст
+     */
     public String encrypt(String plaintext) {
         if (plaintext == null) return null;
+        
         StringBuilder ciphertext = new StringBuilder(plaintext.length());
-        for (char plainChar : plaintext.toCharArray()) {
-             // Обрабатываем только символы, присутствующие в выбранном алфавите
-            int charIndex = alphabet.indexOf(plainChar); // Поиск с учетом регистра
+        for (int i = 0; i < plaintext.length(); i++) {
+            char plainChar = plaintext.charAt(i);
+            int x = plainChar; // ASCII код символа
             
-            if (charIndex != -1) {
-                // E(x) = (ax + b) mod m
-                int encryptedIndex = Math.floorMod((a * charIndex + b), m);
-                ciphertext.append(alphabet.charAt(encryptedIndex));
-            } else {
-                 // Если символа нет в алфавите, оставляем его без изменений
-                ciphertext.append(plainChar);
-            }
+            // Получаем коэффициенты a и b для текущей позиции
+            int a = getAForPosition(i);
+            int b = getBForPosition(i);
+            
+            // E(x) = (a*x + b) mod 256
+            int encryptedValue = Math.floorMod((a * x + b), ASCII_SIZE);
+            
+            // Преобразуем обратно в символ
+            ciphertext.append((char)encryptedValue);
         }
+        
         return ciphertext.toString();
     }
-
+    
+    /**
+     * Дешифрует строку
+     * @param ciphertext Зашифрованный текст
+     * @return Исходный текст
+     */
     public String decrypt(String ciphertext) {
         if (ciphertext == null) return null;
+        
         StringBuilder plaintext = new StringBuilder(ciphertext.length());
-        for (char cipherChar : ciphertext.toCharArray()) {
-            // Обрабатываем только символы из алфавита
-             int charIndex = alphabet.indexOf(cipherChar); // Поиск с учетом регистра
-
-            if (charIndex != -1) {
-                // D(y) = a^-1 * (y - b) mod m
-                 int decryptedIndex = Math.floorMod(aInverse * (charIndex - b), m);
-                 // Эквивалентно: int decryptedIndex = Math.floorMod(aInverse * Math.floorMod(charIndex - b, m), m);
-                plaintext.append(alphabet.charAt(decryptedIndex));
-            } else {
-                // Если символа нет в алфавите, оставляем без изменений
-                plaintext.append(cipherChar);
-            }
+        for (int i = 0; i < ciphertext.length(); i++) {
+            char cipherChar = ciphertext.charAt(i);
+            int y = cipherChar; // ASCII код символа
+            
+            // Получаем обратный элемент a^-1 и коэффициент b для текущей позиции
+            int aInverse = getAInverseForPosition(i);
+            int b = getBForPosition(i);
+            
+            // D(y) = a^-1 * (y - b) mod 256
+            int decryptedValue = Math.floorMod(aInverse * (y - b), ASCII_SIZE);
+            
+            // Преобразуем обратно в символ
+            plaintext.append((char)decryptedValue);
         }
+        
         return plaintext.toString();
+    }
+    
+    /**
+     * Возвращает количество разных коэффициентов a и b
+     * @return Длина массива коэффициентов
+     */
+    public int getKeyLength() {
+        return aValues.length;
+    }
+    
+    /**
+     * Возвращает коэффициент b для индекса 0 (для обратной совместимости)
+     * @return Коэффициент b
+     */
+    public int getB() {
+        return bValues[0];
+    }
+    
+    /**
+     * Возвращает массив коэффициентов a
+     * @return Копия массива aValues
+     */
+    public int[] getAValues() {
+        return aValues.clone();
+    }
+    
+    /**
+     * Возвращает массив коэффициентов b
+     * @return Копия массива bValues
+     */
+    public int[] getBValues() {
+        return bValues.clone();
     }
 }
