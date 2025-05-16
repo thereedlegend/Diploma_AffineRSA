@@ -1,0 +1,11 @@
+{
+    "discord.detailsDebugging": "Отлаживает {file_name}",
+    "discord.detailsEditing": "Редактирует {file_name}",
+    "discord.detailsIdling": "Простаивает",
+    "discord.largeImage": "Редактирует файл {LANG}",
+    "discord.largeImageIdling": "Простаивает",
+    "discord.lowerDetailsDebugging": "Отлаживает: {workspace}",
+    "discord.lowerDetailsEditing": "Рабочая область: {workspace}",
+    "discord.lowerDetailsIdling": "Простаивает",
+    "discord.lowerDetailsNoWorkspaceFound": "Рабочая область не найдена"
+}
