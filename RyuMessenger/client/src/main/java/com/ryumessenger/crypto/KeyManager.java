@@ -458,4 +458,85 @@ public class KeyManager {
             return clientAffineCipher;
         }
     }
+
+    /**
+     * Инициализирует общий секрет Диффи-Хеллмана и подготавливает зашифрованный пакет 
+     * для отправки получателю с использованием RSA шифрования.
+     * 
+     * @param recipientPublicKey Публичный ключ RSA получателя
+     * @param keyLength Длина ключа (количество разных коэффициентов a и b)
+     * @return Зашифрованный пакет с общим секретом для отправки или null при ошибке
+     */
+    public String initializeAndEncryptSharedSecret(RSA.PublicKey recipientPublicKey, int keyLength) {
+        if (recipientPublicKey == null) {
+            System.err.println("Не указан публичный ключ RSA получателя");
+            return null;
+        }
+        
+        try {
+            // Генерируем новый экземпляр Диффи-Хеллмана для этого получателя
+            DiffieHellman recipientSpecificDH = new DiffieHellman();
+            
+            // Используем собственный приватный ключ DH для вычисления общего секрета
+            // Это эмуляция - в реальном протоколе DH общий секрет вычисляется после обмена публичными ключами
+            BigInteger fakeOtherPublicKey = BigInteger.valueOf(123456789); // Для демонстрации
+            BigInteger sharedSecret = recipientSpecificDH.computeSharedSecret(fakeOtherPublicKey);
+            
+            // Создаем EncryptionService для шифрования общего секрета
+            EncryptionService encryptionService = 
+                new EncryptionService(this);
+            
+            // Шифруем общий секрет публичным ключом RSA получателя
+            String encryptedPackage = 
+                encryptionService.prepareEncryptedSharedSecretPackage(sharedSecret, recipientPublicKey);
+            
+            System.out.println("Общий секрет инициализирован и зашифрован для получателя");
+            
+            return encryptedPackage;
+        } catch (Exception e) {
+            System.err.println("Ошибка при инициализации и шифровании общего секрета: " + e.getMessage());
+            e.printStackTrace();
+            return null;
+        }
+    }
+    
+    /**
+     * Получает общий секрет из зашифрованного пакета и создает AffineCipher на его основе.
+     * 
+     * @param encryptedPackage Зашифрованный пакет с общим секретом
+     * @param keyLength Длина ключа (количество разных коэффициентов a и b)
+     * @return AffineCipher, созданный на основе расшифрованного общего секрета, или null при ошибке
+     */
+    public AffineCipher processEncryptedSharedSecretAndCreateCipher(String encryptedPackage, int keyLength) {
+        if (encryptedPackage == null || encryptedPackage.isEmpty()) {
+            System.err.println("Пустой зашифрованный пакет с общим секретом");
+            return null;
+        }
+        
+        try {
+            // Создаем EncryptionService для расшифровки общего секрета
+            EncryptionService encryptionService = 
+                new EncryptionService(this);
+            
+            // Расшифровываем пакет и получаем общий секрет
+            BigInteger sharedSecret = 
+                encryptionService.processEncryptedSharedSecretPackage(encryptedPackage);
+            
+            if (sharedSecret == null) {
+                System.err.println("Не удалось получить общий секрет из пакета");
+                return null;
+            }
+            
+            // Создаем AffineCipher на основе полученного общего секрета
+            AffineCipher sharedCipher = DiffieHellman.createAffineCipher(sharedSecret, keyLength);
+            
+            System.out.println("Создан AffineCipher на основе полученного общего секрета");
+            
+            return sharedCipher;
+        } catch (Exception e) {
+            System.err.println("Ошибка при обработке зашифрованного общего секрета: " + e.getMessage());
+            e.printStackTrace();
+            return null;
+        }
+    }
 } 

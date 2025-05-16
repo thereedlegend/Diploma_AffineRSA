@@ -757,4 +757,188 @@ public class EncryptionService {
             return null;
         }
     }
+
+    /**
+     * Шифрует общий секрет Диффи-Хеллмана публичным ключом RSA получателя
+     * для безопасной передачи между отправителем и получателем.
+     * 
+     * @param sharedSecret Общий секрет для шифрования
+     * @param recipientPublicKey Публичный ключ RSA получателя
+     * @return Зашифрованная строка с общим секретом или null при ошибке
+     */
+    public String encryptSharedSecret(BigInteger sharedSecret, RSA.PublicKey recipientPublicKey) {
+        if (sharedSecret == null || recipientPublicKey == null) {
+            CryptoLogWindow.logOperation("Ошибка", "Не указан общий секрет или публичный ключ получателя");
+            return null;
+        }
+        
+        try {
+            // Создаем объект для шифрования
+            RSA rsaEncrypter = new RSA();
+            rsaEncrypter.setPublicKey(recipientPublicKey.n, recipientPublicKey.e);
+            
+            // Создаем JSON с данными общего секрета
+            JSONObject secretPayload = new JSONObject();
+            secretPayload.put("shared_secret", sharedSecret.toString());
+            secretPayload.put("timestamp", System.currentTimeMillis());
+            secretPayload.put("sender_id", "user_" + clientKeyManager.getClientRsaPublicKey().n.toString().substring(0, 8));
+            
+            CryptoLogWindow.logOperation("Шифрование общего секрета", 
+                "Шифруем общий секрет публичным ключом RSA получателя");
+            
+            // Шифруем JSON с данными общего секрета
+            String encryptedSecret = rsaEncrypter.encryptTextChunked(secretPayload.toString());
+            
+            CryptoLogWindow.logOperation("Общий секрет зашифрован", 
+                "Размер зашифрованных данных: " + encryptedSecret.length() + " символов");
+            
+            return encryptedSecret;
+        } catch (Exception e) {
+            System.err.println("Ошибка при шифровании общего секрета: " + e.getMessage());
+            CryptoLogWindow.logOperation("Ошибка", "Не удалось зашифровать общий секрет: " + e.getMessage());
+            return null;
+        }
+    }
+    
+    /**
+     * Расшифровывает полученный общий секрет Диффи-Хеллмана, зашифрованный 
+     * публичным ключом RSA получателя.
+     * 
+     * @param encryptedSecret Зашифрованный общий секрет
+     * @return Расшифрованный общий секрет или null при ошибке
+     */
+    public BigInteger decryptSharedSecret(String encryptedSecret) {
+        if (encryptedSecret == null || encryptedSecret.isEmpty()) {
+            CryptoLogWindow.logOperation("Ошибка", "Пустой зашифрованный секрет");
+            return null;
+        }
+        
+        if (clientKeyManager.getClientRsaKeyPair() == null) {
+            CryptoLogWindow.logOperation("Ошибка", "RSA-ключи клиента недоступны");
+            return null;
+        }
+        
+        try {
+            // Расшифровываем полученные данные приватным ключом RSA
+            String decryptedJson = clientRsaInstance.decryptTextChunked(encryptedSecret);
+            JSONObject secretPayload = new JSONObject(decryptedJson);
+            
+            // Извлекаем общий секрет
+            String secretString = secretPayload.getString("shared_secret");
+            BigInteger sharedSecret = new BigInteger(secretString);
+            
+            // Получаем дополнительную информацию (для логирования)
+            long timestamp = secretPayload.getLong("timestamp");
+            String senderId = secretPayload.getString("sender_id");
+            
+            CryptoLogWindow.logOperation("Общий секрет расшифрован", 
+                "От отправителя: " + senderId + ", временная метка: " + 
+                new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss").format(new java.util.Date(timestamp)));
+            
+            return sharedSecret;
+        } catch (Exception e) {
+            System.err.println("Ошибка при расшифровке общего секрета: " + e.getMessage());
+            CryptoLogWindow.logOperation("Ошибка", "Не удалось расшифровать общий секрет: " + e.getMessage());
+            return null;
+        }
+    }
+    
+    /**
+     * Создает зашифрованный пакет с общим секретом для отправки получателю.
+     * Комбинирует шифрование общего секрета с RSA и отправку через стандартный
+     * канал связи с сервером.
+     * 
+     * @param sharedSecret Общий секрет для отправки
+     * @param recipientPublicKey Публичный ключ RSA получателя
+     * @return Зашифрованный пакет для отправки на сервер или null при ошибке
+     */
+    public String prepareEncryptedSharedSecretPackage(BigInteger sharedSecret, RSA.PublicKey recipientPublicKey) {
+        if (sharedSecret == null || recipientPublicKey == null) {
+            CryptoLogWindow.logOperation("Ошибка", "Не указан общий секрет или публичный ключ получателя");
+            return null;
+        }
+        
+        if (serverRsaPublicKey == null) {
+            CryptoLogWindow.logOperation("Ошибка", "Публичный RSA-ключ сервера не установлен");
+            return null;
+        }
+        
+        try {
+            // Шифруем общий секрет публичным ключом получателя
+            String encryptedSecret = encryptSharedSecret(sharedSecret, recipientPublicKey);
+            if (encryptedSecret == null) {
+                return null;
+            }
+            
+            // Создаем пакет для отправки на сервер
+            JSONObject packagePayload = new JSONObject();
+            packagePayload.put("encrypted_shared_secret", encryptedSecret);
+            packagePayload.put("sender_public_key_n", clientKeyManager.getClientRsaPublicKey().n.toString());
+            packagePayload.put("sender_public_key_e", clientKeyManager.getClientRsaPublicKey().e.toString());
+            packagePayload.put("message_type", "shared_secret_transfer");
+            packagePayload.put("protocol_version", "1.0");
+            
+            // Шифруем весь пакет публичным ключом сервера для передачи
+            RSA serverRsaEncrypter = new RSA();
+            serverRsaEncrypter.setPublicKey(serverRsaPublicKey.n, serverRsaPublicKey.e);
+            
+            CryptoLogWindow.logOperation("Подготовка пакета с общим секретом", 
+                "Шифруем пакет для передачи через сервер");
+            
+            String encryptedPackage = serverRsaEncrypter.encryptTextChunked(packagePayload.toString());
+            
+            CryptoLogWindow.logOperation("Пакет с общим секретом готов", 
+                "Размер пакета: " + encryptedPackage.length() + " символов");
+            
+            return encryptedPackage;
+        } catch (Exception e) {
+            System.err.println("Ошибка при подготовке пакета с общим секретом: " + e.getMessage());
+            CryptoLogWindow.logOperation("Ошибка", "Не удалось подготовить пакет: " + e.getMessage());
+            return null;
+        }
+    }
+    
+    /**
+     * Обрабатывает зашифрованный пакет с общим секретом от отправителя.
+     * 
+     * @param encryptedPackage Зашифрованный пакет от сервера
+     * @return Общий секрет или null при ошибке
+     */
+    public BigInteger processEncryptedSharedSecretPackage(String encryptedPackage) {
+        if (encryptedPackage == null || encryptedPackage.isEmpty()) {
+            CryptoLogWindow.logOperation("Ошибка", "Пустой зашифрованный пакет");
+            return null;
+        }
+        
+        try {
+            // Расшифровываем пакет приватным ключом RSA клиента
+            String decryptedPackageJson = clientRsaInstance.decryptTextChunked(encryptedPackage);
+            JSONObject packagePayload = new JSONObject(decryptedPackageJson);
+            
+            // Извлекаем зашифрованный общий секрет
+            String encryptedSecret = packagePayload.getString("encrypted_shared_secret");
+            
+            // Получаем информацию об отправителе
+            String senderPublicKeyN = packagePayload.getString("sender_public_key_n");
+            String senderPublicKeyE = packagePayload.getString("sender_public_key_e");
+            
+            CryptoLogWindow.logOperation("Получен пакет с общим секретом", 
+                "Отправитель: " + senderPublicKeyN.substring(0, 8) + "...");
+            
+            // Расшифровываем общий секрет
+            BigInteger sharedSecret = decryptSharedSecret(encryptedSecret);
+            
+            if (sharedSecret != null) {
+                CryptoLogWindow.logOperation("Общий секрет успешно получен", 
+                    "Первые 8 символов: " + sharedSecret.toString().substring(0, 
+                    Math.min(8, sharedSecret.toString().length())) + "...");
+            }
+            
+            return sharedSecret;
+        } catch (Exception e) {
+            System.err.println("Ошибка при обработке пакета с общим секретом: " + e.getMessage());
+            CryptoLogWindow.logOperation("Ошибка", "Не удалось обработать пакет: " + e.getMessage());
+            return null;
+        }
+    }
 } 
