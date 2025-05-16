@@ -72,7 +72,7 @@ def create_app(config_object='RyuMessenger.server.core.config'):
     for handler in app.logger.handlers:
         app.logger.removeHandler(handler)
     
-    handler = RotatingFileHandler(LOG_PATH, maxBytes=10485760, backupCount=3)
+    handler = RotatingFileHandler(LOG_PATH, maxBytes=10485760, backupCount=3, encoding='utf-8')
     handler.setFormatter(logging.Formatter(
         '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
     ))
@@ -87,9 +87,27 @@ def create_app(config_object='RyuMessenger.server.core.config'):
     werkzeug_logger = logging.getLogger('werkzeug')
     werkzeug_logger.addFilter(RegularRequestsFilter())
     
+    # Убираем существующие обработчики и добавляем новый с правильной кодировкой
+    for handler in werkzeug_logger.handlers:
+        werkzeug_logger.removeHandler(handler)
+    werkzeug_handler = RotatingFileHandler(LOG_PATH, maxBytes=10485760, backupCount=3, encoding='utf-8')
+    werkzeug_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+    ))
+    werkzeug_logger.addHandler(werkzeug_handler)
+    
     # Также фильтруем логи от самого Flask
     flask_logger = logging.getLogger('flask')
     flask_logger.addFilter(RegularRequestsFilter())
+    
+    # Убираем существующие обработчики и добавляем новый с правильной кодировкой
+    for handler in flask_logger.handlers:
+        flask_logger.removeHandler(handler)
+    flask_handler = RotatingFileHandler(LOG_PATH, maxBytes=10485760, backupCount=3, encoding='utf-8')
+    flask_handler.setFormatter(logging.Formatter(
+        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
+    ))
+    flask_logger.addHandler(flask_handler)
     
     # И наконец настраиваем корневой логгер
     root_logger = logging.getLogger()
