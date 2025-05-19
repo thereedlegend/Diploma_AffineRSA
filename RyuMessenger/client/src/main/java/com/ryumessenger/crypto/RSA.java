@@ -40,6 +40,10 @@ public class RSA {
             this.n = n;
             this.d = d;
         }
+
+        public byte[] toByteArray() {
+            return d.toByteArray();
+        }
     }
 
     public RSA() {}
@@ -105,6 +109,14 @@ public class RSA {
         if (message.compareTo(this.n) >= 0) {
             throw new IllegalArgumentException("Message integer (" + message + ") is too large for n (" + this.n + "). Chunking error?");
         }
+
+        // Защита от timing-атак: добавляем случайную задержку
+        try {
+            Thread.sleep(new SecureRandom().nextInt(10));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
         return message.modPow(this.e, this.n);
     }
 
@@ -112,10 +124,17 @@ public class RSA {
         if (this.n == null || this.d == null) {
             throw new IllegalStateException("Private key (n, d) is not set for decryption.");
         }
-         if (ciphertext.compareTo(this.n) >= 0) {
-            // Это не должно происходить, т.к. результат modPow всегда < n
+        if (ciphertext.compareTo(this.n) >= 0) {
             throw new IllegalArgumentException("Ciphertext integer (" + ciphertext + ") is too large for n (" + this.n + ").");
         }
+
+        // Защита от timing-атак: добавляем случайную задержку
+        try {
+            Thread.sleep(new SecureRandom().nextInt(10));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+
         return ciphertext.modPow(this.d, this.n);
     }
 

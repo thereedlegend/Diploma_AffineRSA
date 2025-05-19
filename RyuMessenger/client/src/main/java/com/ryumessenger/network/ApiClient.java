@@ -22,6 +22,7 @@ import com.ryumessenger.model.User;
 import com.ryumessenger.ui.CryptoLogWindow;
 import com.ryumessenger.security.KeyManager;
 import com.ryumessenger.security.KeyManagerAdapter;
+import com.ryumessenger.model.UserPublicKeys;
 
 public class ApiClient {
 
@@ -152,80 +153,150 @@ public class ApiClient {
      */
     public void fetchAndSetServerPublicKey(Consumer<Boolean> callback) {
         LOGGER.info("ApiClient: Отправляем запрос на получение публичного ключа сервера");
+        System.out.println("[ApiClient DEBUG] fetchAndSetServerPublicKey: Method called."); // DEBUG LOG
         
         get("/keys", response -> {
-            boolean success = false;
+            boolean overallSuccess = false;
+            boolean dhParamsSetSuccessfully = false; // Флаг для успешной установки P и G
+            boolean dhSharedSecretGenerated = false; // Флаг для успешной генерации общего секрета
+            
+            System.out.println("[ApiClient DEBUG] fetchAndSetServerPublicKey: GET /keys callback received. Response success? " + response.isSuccess()); // DEBUG LOG
             
             if (response.isSuccess()) {
                 try {
                     JSONObject json = response.getJson();
-                    if (json != null && json.has("data")) {
-                        JSONObject data = json.getJSONObject("data");
+                    if (json != null) { 
+                        System.out.println("[ApiClient DEBUG] fetchAndSetServerPublicKey: Response JSON is not null.");
                         
-                        // Получаем данные ключа RSA
-                        if (data.has("rsa_public_key")) {
-                            JSONObject rsaKey = data.getJSONObject("rsa_public_key");
+                        KeyManager securityKeyManager = Main.getKeyManager();
+                        if (securityKeyManager == null) {
+                            LOGGER.severe("ApiClient: security.KeyManager is NULL. Невозможно обработать ключи сервера.");
+                            System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: security.KeyManager is NULL at the beginning of key processing.");
+                            if (callback != null) callback.accept(false);
+                            return;
+                        }
+
+                        // 1. Обработка RSA ключа (как и раньше)
+                        if (json.has("rsa_public_key")) {
+                            System.out.println("[ApiClient DEBUG] fetchAndSetServerPublicKey: Processing RSA public key...");
+                            JSONObject rsaKey = json.getJSONObject("rsa_public_key");
                             String nStr = rsaKey.getString("n");
                             String eStr = rsaKey.getString("e");
                             BigInteger n = new BigInteger(nStr);
                             BigInteger e = new BigInteger(eStr);
+                            securityKeyManager.setServerRSAPublicKey(n, e);
+                            LOGGER.info("ApiClient: Публичный RSA ключ сервера успешно установлен в security.KeyManager");
+                            System.out.println("[ApiClient DEBUG] fetchAndSetServerPublicKey: RSA key SET in security.KeyManager.");
                             
-                            // Устанавливаем ключ в новый com.ryumessenger.security.KeyManager
-                            KeyManager securityKeyManager = Main.getKeyManager(); // Это com.ryumessenger.security.KeyManager
-                            if (securityKeyManager != null) {
-                                securityKeyManager.setServerRSAPublicKey(n, e);
-                                LOGGER.info("ApiClient: Публичный RSA ключ сервера успешно установлен в security.KeyManager");
-                            } else {
-                                LOGGER.warning("ApiClient: security.KeyManager is null. Не удалось установить RSA ключ сервера.");
-                            }
-                            
-                            // Устанавливаем ключ в старый com.ryumessenger.crypto.KeyManager
                             com.ryumessenger.crypto.KeyManager legacyKeyManager = Main.getLegacyKeyManager();
                             if (legacyKeyManager != null) {
-                                legacyKeyManager.setServerRsaPublicKey(nStr, eStr); // Старый метод принимает строки
+                                legacyKeyManager.setServerRsaPublicKey(nStr, eStr); 
                                 LOGGER.info("ApiClient: Публичный RSA ключ сервера успешно установлен в legacy.KeyManager");
+                                System.out.println("[ApiClient DEBUG] fetchAndSetServerPublicKey: RSA key SET in legacy.KeyManager.");
                             } else {
-                                LOGGER.warning("ApiClient: legacy.KeyManager is null. Не удалось установить RSA ключ сервера.");
+                                LOGGER.warning("ApiClient: legacy.KeyManager is null. Не удалось установить RSA ключ сервера (legacy).");
                             }
+                        } else {
+                            System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: 'rsa_public_key' not found in server response.");
                         }
                         
-                        // Получаем параметры Диффи-Хеллмана (публичный ключ сервера DH)
-                        if (data.has("dh_public_key_y")) {
-                            String dhPublicKeyYStr = data.getString("dh_public_key_y");
-                            BigInteger dhPublicKeyY = new BigInteger(dhPublicKeyYStr);
-                            
-                            KeyManager securityKeyManager = Main.getKeyManager(); // Это com.ryumessenger.security.KeyManager
-                            if (securityKeyManager != null) {
+                        // 2. Получение и установка DH параметров (P и G)
+                        if (json.has("dh_parameters")) {
+                            JSONObject dhParamsJson = json.getJSONObject("dh_parameters");
+                            if (dhParamsJson.has("p") && dhParamsJson.has("g")) {
+                                String pStr = dhParamsJson.getString("p");
+                                String gStr = dhParamsJson.getString("g");
                                 try {
-                                    securityKeyManager.setServerDHPublicKey(dhPublicKeyY);
-                                    LOGGER.info("ApiClient: Публичный DH ключ сервера успешно установлен в security.KeyManager");
-                                } catch (Exception ex) {
-                                    LOGGER.log(Level.SEVERE, "ApiClient: Ошибка при установке DH ключа сервера в security.KeyManager", ex);
+                                    BigInteger p = new BigInteger(pStr);
+                                    BigInteger g = new BigInteger(gStr);
+                                    securityKeyManager.setDHParameters(p, g); // Это вызовет initDHKeys() внутри
+                                    dhParamsSetSuccessfully = true;
+                                    LOGGER.info("ApiClient: DH параметры (P,G) сервера успешно установлены в security.KeyManager.");
+                                    System.out.println("[ApiClient DEBUG] fetchAndSetServerPublicKey: DH parameters (P,G) SET in security.KeyManager.");
+                                } catch (NumberFormatException nfe) {
+                                    LOGGER.log(Level.SEVERE, "ApiClient: Ошибка парсинга DH параметров P или G из строки.", nfe);
+                                    System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: Error parsing DH parameters P/G: " + nfe.getMessage());
+                                } catch (Exception e) {
+                                    LOGGER.log(Level.SEVERE, "ApiClient: Ошибка при установке DH параметров P,G в security.KeyManager.", e);
+                                    System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: Exception setting DH parameters P/G: " + e.getMessage());
                                 }
+                            } else {
+                                System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: 'dh_parameters' object in server response is missing 'p' or 'g'.");
                             }
-
-                            // Также устанавливаем ключ и в KeyManagerAdapter, если он это поддерживает
-                            // KeyManagerAdapter имеет setServerDHPublicKey(BigInteger dhPublicKey)
-                            KeyManagerAdapter adapter = Main.getSecurityKeyManager();
-                            if (adapter != null) {
-                                try {
-                                    adapter.setServerDHPublicKey(dhPublicKeyY); // Адаптер должен быть способен обработать это
-                                    LOGGER.info("ApiClient: Публичный DH ключ сервера успешно установлен в KeyManagerAdapter");
-                                } catch (Exception ex) {
-                                    LOGGER.log(Level.WARNING, "Ошибка при установке ключа DH в KeyManagerAdapter", ex);
-                                }
-                            }
+                        } else {
+                            System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: 'dh_parameters' not found in server response.");
                         }
 
-                        success = true; // Успех, если хотя бы что-то было установлено
+                        // 3. Получение и установка публичного ключа DH сервера (Y) и генерация общего секрета
+                        // Это должно происходить ПОСЛЕ успешной установки P и G
+                        if (dhParamsSetSuccessfully) {
+                            String dhKeyFieldName = null;
+                            if (json.has("dh_public_key")) dhKeyFieldName = "dh_public_key"; // Для совместимости, если сервер использует это имя
+                            else if (json.has("dh_public_key_y")) dhKeyFieldName = "dh_public_key_y";
+
+                            if (dhKeyFieldName != null) {
+                                System.out.println("[ApiClient DEBUG] fetchAndSetServerPublicKey: Processing DH public key Y from field '" + dhKeyFieldName + "'...");
+                                String dhPublicKeyYStr = json.getString(dhKeyFieldName);
+                                try {
+                                    BigInteger dhPublicKeyYBigInt = new BigInteger(dhPublicKeyYStr);
+                                    securityKeyManager.setServerDHPublicKey(dhPublicKeyYBigInt); // Это вычислит общий секрет
+                                    LOGGER.info("ApiClient: Публичный ключ DH сервера Y успешно установлен и общий секрет должен быть вычислен в security.KeyManager.");
+                                    System.out.println("[ApiClient DEBUG] fetchAndSetServerPublicKey: Server DH public key Y SET in security.KeyManager.");
+                                    
+                                    if (securityKeyManager.getDHSharedSecret() != null) {
+                                        System.out.println("[ApiClient DEBUG] fetchAndSetServerPublicKey: DH shared secret IS available in security.KeyManager after setServerDHPublicKey.");
+                                        dhSharedSecretGenerated = true;
+                                    } else {
+                                        System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: DH shared secret is NULL in security.KeyManager after setServerDHPublicKey.");
+                                    }
+                                    
+                                    // Установка в KeyManagerAdapter (для legacy)
+                                    KeyManagerAdapter adapter = Main.getSecurityKeyManager(); 
+                                    if (adapter != null) {
+                                        // Адаптер может не поддерживать установку P,G отдельно.
+                                        // Он ожидает, что его KeyManager (legacy) использует свои P,G.
+                                        // Для простоты, передадим только Y. Если legacy KeyManager использует другие P,G, секрет не совпадет.
+                                        // Это ограничение текущей архитектуры с двумя KeyManager.
+                                        adapter.setServerDHPublicKey(dhPublicKeyYBigInt); 
+                                        LOGGER.info("ApiClient: Публичный DH ключ сервера Y также установлен в KeyManagerAdapter (legacy).");
+                                        System.out.println("[ApiClient DEBUG] fetchAndSetServerPublicKey: Server DH public key Y SET in KeyManagerAdapter (legacy).");
+                                    } else {
+                                        LOGGER.warning("ApiClient: KeyManagerAdapter is null. Не удалось установить DH ключ Y сервера (legacy).");
+                                    }
+                                } catch (NumberFormatException nfe) {
+                                    LOGGER.log(Level.SEVERE, "ApiClient: Ошибка парсинга DH публичного ключа Y сервера из строки.", nfe);
+                                    System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: Error parsing server DH public key Y: " + nfe.getMessage());
+                                } catch (Exception ex) {
+                                    LOGGER.log(Level.SEVERE, "ApiClient: Ошибка при установке DH ключа Y сервера или генерации общего секрета в security.KeyManager.", ex);
+                                    System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: Exception setting server DH key Y or generating shared secret: " + ex.getMessage());
+                                }
+                            } else {
+                                System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: Neither 'dh_public_key' nor 'dh_public_key_y' found in server response for DH Y value.");
+                            }
+                        } else {
+                             System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: DH Parameters (P,G) were not set successfully, skipping server DH public key Y processing.");
+                        }
+                        
+                        overallSuccess = dhParamsSetSuccessfully && dhSharedSecretGenerated;
+                        System.out.println("[ApiClient DEBUG] fetchAndSetServerPublicKey: Final check - dhParamsSetSuccessfully=" + dhParamsSetSuccessfully + ", dhSharedSecretGenerated=" + dhSharedSecretGenerated + ", overallSuccess=" + overallSuccess);
+
+                    } else { // json == null
+                        System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: Response JSON is null after successful HTTP request.");
                     }
-                } catch (Exception e) {
-                    LOGGER.log(Level.SEVERE, "ApiClient: Ошибка при обработке ключей сервера", e);
+                } catch (JSONException jsonEx) {
+                    LOGGER.log(Level.SEVERE, "ApiClient: Ошибка парсинга JSON ответа от /keys", jsonEx);
+                    System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: JSONException processing server keys: " + jsonEx.getMessage());
+                } catch (Exception e) { // Другие общие исключения при обработке
+                    LOGGER.log(Level.SEVERE, "ApiClient: Общая ошибка при обработке ключей сервера", e);
+                    System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: Generic exception processing server keys: " + e.getMessage());
                 }
+            } else { // response.isSuccess() == false
+                System.err.println("[ApiClient DEBUG ERROR] fetchAndSetServerPublicKey: GET /keys request failed. Status: " + response.getStatusCode() + ". Body: " + response.getBody());
             }
             
+            System.out.println("[ApiClient DEBUG] fetchAndSetServerPublicKey: Calling callback with overallSuccess: " + overallSuccess);
             if (callback != null) {
-                callback.accept(success);
+                callback.accept(overallSuccess);
             }
         });
     }
@@ -483,6 +554,44 @@ public class ApiClient {
             return;
         }
         post("/user/update", finalBody.toString(), callback);
+    }
+
+    /**
+     * Получает публичные ключи (RSA и DH-Y) указанного пользователя с сервера.
+     * @param userId ID пользователя, чьи ключи нужно получить.
+     * @param callback Callback-функция, вызываемая с объектом UserPublicKeys или null в случае ошибки.
+     */
+    public void fetchUserPublicKeys(String userId, Consumer<UserPublicKeys> callback) {
+        LOGGER.info("ApiClient: Fetching public keys for user ID: " + userId);
+        // Эндпоинт на сервере, например: /api/user/{userId}/public-keys
+        // Этот эндпоинт должен возвращать JSON вида:
+        // {
+        //   "rsa_public_key": { "n": "...", "e": "..." },
+        //   "dh_public_key_y": "..."
+        // }
+        // DH параметры P и G считаются глобальными и получаются через /api/keys
+        get("/user/" + userId + "/public-keys", response -> {
+            if (response.isSuccess() && response.getJson() != null) {
+                try {
+                    JSONObject json = response.getJson();
+                    
+                    JSONObject rsaKeyJson = json.getJSONObject("rsa_public_key");
+                    BigInteger rsaN = new BigInteger(rsaKeyJson.getString("n"));
+                    BigInteger rsaE = new BigInteger(rsaKeyJson.getString("e"));
+
+                    BigInteger dhY = new BigInteger(json.getString("dh_public_key_y"));
+
+                    UserPublicKeys keys = new UserPublicKeys(rsaN, rsaE, dhY);
+                    callback.accept(keys);
+                } catch (Exception e) {
+                    LOGGER.log(Level.SEVERE, "ApiClient: Error parsing public keys for user " + userId + ". Response: " + response.getBody(), e);
+                    callback.accept(null);
+                }
+            } else {
+                LOGGER.log(Level.WARNING, "ApiClient: Failed to fetch public keys for user " + userId + ". Status: " + response.getStatusCode() + ", Body: " + response.getBody());
+                callback.accept(null);
+            }
+        });
     }
 
     public static class ApiResponse {

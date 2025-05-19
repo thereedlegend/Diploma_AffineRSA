@@ -180,8 +180,7 @@ def create_app(config_object='RyuMessenger.server.core.config'):
     if not hasattr(app, 'extensions') or 'key_manager' not in app.extensions:
         app.key_manager = ServerKeyManager(keys_file=os.path.join(app.instance_path, 'server_keys.json'))
         app.encryption_service = EncryptionService(
-            server_rsa_cipher=app.key_manager.get_rsa_cipher(),
-            server_affine_params=app.key_manager.get_affine_params()
+            server_rsa_cipher=app.key_manager.get_rsa_cipher()
         )
         app.user_service = UserService(encryption_service=app.encryption_service)
         app.message_service = MessageService(encryption_service=app.encryption_service, user_service=app.user_service)

@@ -21,6 +21,10 @@ import com.ryumessenger.security.SecureMessageFormatter;
 import com.ryumessenger.security.KeyManager; // Новый импорт
 import com.ryumessenger.security.AuthPayloadFormatter; // <--- Добавлен импорт
 import com.ryumessenger.security.EnhancedAffineCipher; // <--- Добавлен импорт
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 
 public class Main {
 
@@ -91,17 +95,16 @@ public class Main {
         // Инициализируем новый security.KeyManager
         try {
             keyManager = new KeyManager(); // Используем com.ryumessenger.security.KeyManager
-            // KeyManager из com.ryumessenger.security должен сам загружать/генерировать ключи
-            // и быть готовым к вычислению общего секрета DH после установки ключа сервера
         } catch (RuntimeException e) {
             System.err.println("КРИТИЧЕСКАЯ ОШИБКА при инициализации security.KeyManager: " + e.getMessage());
             e.printStackTrace();
             // Это может потребовать остановки приложения или уведомления пользователя
             // Для простоты пока только логируем
+            // Если KeyManager не создан, дальнейшая инициализация зависимых компонентов не имеет смысла.
+            return; 
         }
         
         // Инициализируем сервис шифрования со старым KeyManager
-        // EncryptionService, вероятно, ожидает com.ryumessenger.crypto.KeyManager
         if (legacyKeyManager != null) {
             encryptionService = new EncryptionService(legacyKeyManager);
         } else {
@@ -122,41 +125,42 @@ public class Main {
             System.err.println("SecureMessageFormatter не может быть инициализирован: securityKeyManagerAdapter is null");
         }
         
-        // Инициализируем другие сервисы
         chatService = new ChatService(apiClient);
-        // UserService, вероятно, также ожидает старый EncryptionService (и, следовательно, старый KeyManager)
+        // UserService будет инициализирован позже, после попытки получить ключи сервера
+        
+        // Запрашиваем публичный ключ сервера и ждем его получения
+        System.out.println("Main: Attempting to fetch server public key...");
+        CompletableFuture<Boolean> serverKeyFuture = fetchServerPublicKey();
+        
+        try {
+            Boolean keysFetchedSuccessfully = serverKeyFuture.get(30, TimeUnit.SECONDS); // Ожидаем до 30 секунд
+
+            if (Boolean.TRUE.equals(keysFetchedSuccessfully) && keyManager != null && keyManager.isServerDHPublicKeyAvailable()) {
+                System.out.println("Main: Server public keys fetched successfully. Initializing AuthPayloadFormatter...");
+                byte[] dhSharedSecret = keyManager.getDHSharedSecret();
+                if (dhSharedSecret != null) {
+                    EnhancedAffineCipher enhancedAffineCipher = new EnhancedAffineCipher(dhSharedSecret);
+                    authPayloadFormatter = new AuthPayloadFormatter(keyManager, enhancedAffineCipher);
+                    System.out.println("Main: AuthPayloadFormatter initialized successfully.");
+                } else {
+                    System.err.println("Main: AuthPayloadFormatter could not be initialized: DH shared secret is still null after successful key fetch.");
+                    authPayloadFormatter = null; // Явно указываем, что инициализация не удалась
+                }
+            } else {
+                System.err.println("Main: Failed to fetch/set server public key, or DH key not available. AuthPayloadFormatter will not be initialized.");
+                authPayloadFormatter = null; // Явно указываем, что инициализация не удалась
+            }
+        } catch (InterruptedException | ExecutionException | TimeoutException e) {
+            System.err.println("Main: Error or timeout waiting for server public key: " + e.getMessage());
+            e.printStackTrace();
+            authPayloadFormatter = null; // Явно указываем, что инициализация не удалась
+        }
+
+        // Инициализируем UserService ПОСЛЕ попытки инициализации AuthPayloadFormatter
         if (encryptionService != null) {
-            userService = new UserService(apiClient, encryptionService);
+            userService = new UserService(apiClient, encryptionService); // UserService вызовет getAuthPayloadFormatter()
         } else {
             System.err.println("UserService не может быть инициализирован: encryptionService is null");
-        }
-        
-        // Запрашиваем публичный ключ сервера (используя новый keyManager, если это применимо к ApiClient)
-        // ApiClient.fetchAndSetServerPublicKey должен быть адаптирован или использовать нужный KeyManager
-        fetchServerPublicKey(); // После этого вызова DH ключ сервера должен быть установлен в keyManager
-
-        // Инициализация AuthPayloadFormatter ПОСЛЕ fetchServerPublicKey,
-        // так как EnhancedAffineCipher зависит от DH ключей, которые устанавливаются во время fetch.
-        // Однако, DH общий секрет вычисляется только когда известен и клиентский и серверный DH ключ.
-        // KeyManager должен предоставлять метод для получения EnhancedAffineCipher или самого DH секрета.
-
-        if (keyManager != null) {
-            // Предполагаем, что KeyManager может предоставить DH общий секрет.
-            // Если DH секрет еще не доступен (например, ключ сервера не получен),
-            // EnhancedAffineCipher может быть не полностью функционален или должен обрабатывать это.
-            byte[] dhSharedSecret = keyManager.getDHSharedSecret(); // Этого метода может не быть!
-            if (dhSharedSecret != null) {
-                EnhancedAffineCipher enhancedAffineCipher = new EnhancedAffineCipher(dhSharedSecret);
-                authPayloadFormatter = new AuthPayloadFormatter(keyManager, enhancedAffineCipher);
-            } else {
-                 System.err.println("AuthPayloadFormatter не может быть инициализирован: DH общий секрет не доступен из KeyManager." +
-                                    " Возможно, ключ сервера DH еще не получен или не вычислен общий секрет.");
-                // В этом случае authPayloadFormatter останется null, и попытки его использовать вызовут ошибку.
-                // Это нужно будет обработать в ApiClient.login и других местах.
-                // Альтернатива: AuthPayloadFormatter сам создает EnhancedAffineCipher по требованию.
-            }
-        } else {
-            System.err.println("AuthPayloadFormatter не может быть инициализирован: keyManager (security) is null");
         }
     }
 
@@ -189,11 +193,8 @@ public class Main {
 
     public static AuthPayloadFormatter getAuthPayloadFormatter() { // <--- Добавлен геттер
         if (authPayloadFormatter == null) {
-            // Попытка инициализации "на лету", если он не был создан в initializeServices
-            // Это может произойти, если DH ключ сервера был получен после initializeServices,
-            // или если getDHSharedSecret() вернул null в первый раз.
             System.err.println("AuthPayloadFormatter is null. Attempting on-the-fly initialization.");
-            if (keyManager != null && keyManager.isServerDHPublicKeyAvailable()) { // Добавим проверку на доступность ключа сервера
+            if (keyManager != null && keyManager.isServerDHPublicKeyAvailable()) { 
                 byte[] dhSharedSecret = keyManager.getDHSharedSecret();
                 if (dhSharedSecret != null) {
                     EnhancedAffineCipher enhancedAffineCipher = new EnhancedAffineCipher(dhSharedSecret);
@@ -203,7 +204,10 @@ public class Main {
                     System.err.println("On-the-fly initialization of AuthPayloadFormatter failed: DH shared secret is still null.");
                 }
             } else {
-                System.err.println("On-the-fly initialization of AuthPayloadFormatter failed: KeyManager is null or server DH public key not available.");
+                String reason = "KeyManager is " + (keyManager == null ? "null" : "available") + 
+                                ", server DH public key available: " + (keyManager != null && keyManager.isServerDHPublicKeyAvailable()) + 
+                                (keyManager != null && !keyManager.isServerDHPublicKeyAvailable() ? " (DH key likely not received from server or processing failed)" : "");
+                System.err.println("On-the-fly initialization of AuthPayloadFormatter failed: " + reason);
             }
         }
         return authPayloadFormatter;
@@ -275,59 +279,39 @@ public class Main {
         System.out.println("Пользователь вышел из системы (Main context).");
     }
 
-    private static void fetchServerPublicKey() {
-        System.out.println("Main: Attempting to fetch server public key...");
-        // Убедимся, что apiClient существует
-        if (apiClient == null) {
-            System.err.println("Main: ApiClient is null, cannot fetch server public key.");
-            serverPublicKeyFetched = false;
-            return;
-        }
-        // Убедимся, что keyManager (security) существует для установки ключей
-        // Метод fetchAndSetServerPublicKey в ApiClient должен знать, какой KeyManager использовать.
-        // Предположим, он внутренне вызывает Main.getKeyManager() или Main.getLegacyKeyManager()
-        // или принимает KeyManager в качестве параметра.
-        // Текущий fetchAndSetServerPublicKey в ApiClient похоже использует Main.getKeyManager() 
-        // и Main.getSecurityKeyManager() (который был адаптером)
-        // Нужно будет проверить и адаптировать ApiClient.fetchAndSetServerPublicKey
-        
-        // Пока что, предполагая, что ApiClient.fetchAndSetServerPublicKey правильно обработает
-        // получение и установку ключей через новый Main.getKeyManager() для security.KeyManager
-        // и, возможно, через Main.getLegacyKeyManager() или Main.getSecurityKeyManagerAdapter() для старой части
-        
-        // Для установки в новый com.ryumessenger.security.KeyManager:
-        KeyManager currentSecurityKeyManager = getKeyManager();
-        if (currentSecurityKeyManager == null) {
-            System.err.println("Main: com.ryumessenger.security.KeyManager is null. Cannot set server public key in it.");
-            // Если он null, то и старый метод fetchAndSetServerPublicKey, который его ожидал, не сработает.
-        }
-
-        // Для установки в старый com.ryumessenger.crypto.KeyManager через адаптер (если fetchAndSetServerPublicKey его использует):
-        // KeyManagerAdapter currentAdapter = getSecurityKeyManagerAdapter();
-
-        // Логика fetchAndSetServerPublicKey в ApiClient должна быть такой:
-        // 1. Получить ключи с сервера.
-        // 2. Установить их в com.ryumessenger.security.KeyManager (через Main.getKeyManager()).
-        // 3. Установить их в com.ryumessenger.crypto.KeyManager (через Main.getLegacyKeyManager() или адаптер).
-        // Сейчас я предполагаю, что существующий вызов fetchAndSetServerPublicKey попытается это сделать.
-        // Важно: ApiClient.fetchAndSetServerPublicKey (старая версия) ожидает Consumer<Boolean>
-        // Новая версия в ApiClient (которую я планирую добавить) возвращает CompletableFuture.
-        // Нужно будет унифицировать или использовать правильную версию.
-        // Текущий код в Main вызывает версию с Consumer<Boolean>.
-
+    // Метод для получения публичного ключа сервера.
+    // Теперь возвращает CompletableFuture для отслеживания завершения.
+    private static CompletableFuture<Boolean> fetchServerPublicKey() {
+        CompletableFuture<Boolean> future = new CompletableFuture<>();
+        System.out.println("[Main DEBUG] fetchServerPublicKey: Called by Main."); // DEBUG LOG
         apiClient.fetchAndSetServerPublicKey(success -> {
-            serverPublicKeyFetched = success;
+            System.out.println("[Main DEBUG] fetchServerPublicKey: ApiClient callback received. Success: " + success); // DEBUG LOG
             if (success) {
-                System.out.println("Main: Server public key fetched/set successfully (potentially for both key managers).");
-            } else {
-                System.out.println("Main: Failed to fetch/set server public key. Authentication features might be limited.");
-            }
-            SwingUtilities.invokeLater(() -> {
-                if (loginFrameInstance != null && loginFrameInstance.isVisible()) {
-                    loginFrameInstance.checkServerKeyStatusAndUpdateUI();
+                System.out.println("[Main DEBUG] fetchServerPublicKey: ApiClient reported success. Checking KeyManager state..."); // DEBUG LOG
+                boolean kmNotNull = keyManager != null;
+                boolean dhKeyAvailable = kmNotNull && keyManager.isServerDHPublicKeyAvailable();
+                boolean sharedSecretAvailable = dhKeyAvailable && keyManager.getDHSharedSecret() != null;
+                
+                System.out.println("[Main DEBUG] fetchServerPublicKey: KeyManager not null? " + kmNotNull); // DEBUG LOG
+                System.out.println("[Main DEBUG] fetchServerPublicKey: DH Key Available in KeyManager? " + dhKeyAvailable); // DEBUG LOG
+                System.out.println("[Main DEBUG] fetchServerPublicKey: DH Shared Secret Available in KeyManager? " + sharedSecretAvailable); // DEBUG LOG
+
+                if (kmNotNull && dhKeyAvailable && sharedSecretAvailable) {
+                    serverPublicKeyFetched = true; 
+                    System.out.println("[Main DEBUG] fetchServerPublicKey: DH shared secret is available. Completing future with true."); // DEBUG LOG
+                    future.complete(true);
+                } else {
+                    System.err.println("[Main DEBUG ERROR] fetchServerPublicKey: Server key processing reported success by ApiClient, but DH shared secret is NOT available in KeyManager."); // DEBUG LOG
+                    serverPublicKeyFetched = false;
+                    future.complete(false); 
                 }
-            });
+            } else {
+                System.err.println("[Main DEBUG ERROR] fetchServerPublicKey: ApiClient reported failure. Completing future with false."); // DEBUG LOG
+                serverPublicKeyFetched = false;
+                future.complete(false);
+            }
         });
+        return future;
     }
 
     /**

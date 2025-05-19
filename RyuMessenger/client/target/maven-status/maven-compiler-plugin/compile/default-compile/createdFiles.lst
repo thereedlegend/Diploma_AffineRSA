@@ -45,6 +45,7 @@ com\ryumessenger\util\Logger.class
 com\ryumessenger\util\CryptoManager.class
 com\ryumessenger\crypto\DiffieHellman.class
 com\ryumessenger\ui\theme\AppTheme$ThemeType.class
+com\ryumessenger\model\UserPublicKeys.class
 com\ryumessenger\security\EncryptionService.class
 com\ryumessenger\service\ChatService.class
 com\ryumessenger\ui\MainFrame.class

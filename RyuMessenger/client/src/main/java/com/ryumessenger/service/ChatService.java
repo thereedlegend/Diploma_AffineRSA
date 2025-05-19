@@ -79,6 +79,47 @@ public class ChatService {
             if (response.isSuccess() && response.getJson() != null && response.getJson().has("messages")) {
                 org.json.JSONArray messagesJsonArray = response.getJson().getJSONArray("messages");
                 List<Message> messages = Message.fromJsonArray(messagesJsonArray);
+
+                com.ryumessenger.crypto.EncryptionService cryptoService = com.ryumessenger.Main.getEncryptionService();
+                com.ryumessenger.security.KeyManager currentUserSecurityKeyManager = com.ryumessenger.Main.getKeyManager();
+
+                if (cryptoService != null && currentUserSecurityKeyManager != null) {
+                    for (Message msg : messages) {
+                        if (msg.getText() != null && !msg.getText().isEmpty() && !msg.isError()) { // Пытаемся расшифровать, только если есть текст и нет предыдущей ошибки парсинга
+                            try {
+                                // Содержимое msg.getText() - это e2eEncryptedMessagePayload
+                                String decryptedContent = cryptoService.decryptForUser(msg.getText(), currentUserSecurityKeyManager);
+                                
+                                if (decryptedContent != null) {
+                                    msg.setText(decryptedContent); // Обновляем текст сообщения расшифрованным
+                                    // Можно добавить флаг msg.setSuccessfullyDecrypted(true); если такой есть
+                                } else {
+                                    // Не удалось расшифровать (например, ключ не тот, или сообщение не было зашифровано по схеме E2E)
+                                    System.err.println("ChatService: Failed to decrypt message ID " + msg.getId() + ". Content might be corrupted, not E2E encrypted, or intended for another recipient.");
+                                    msg.setText("[Не удалось расшифровать сообщение: " + msg.getText().substring(0, Math.min(30, msg.getText().length())) + "...]"); // Указываем на ошибку
+                                    msg.setError(true); // Устанавливаем флаг ошибки
+                                    msg.setStatus(Message.MessageStatus.FAILED); // Можно использовать статус
+                                }
+                            } catch (Exception e) {
+                                System.err.println("ChatService: Exception during decryption of message ID " + msg.getId() + ": " + e.getMessage());
+                                e.printStackTrace();
+                                msg.setText("[Ошибка при расшифровке сообщения]");
+                                msg.setError(true);
+                                msg.setStatus(Message.MessageStatus.FAILED);
+                            }
+                        }
+                    }
+                } else {
+                    System.err.println("ChatService: Cannot decrypt messages. CryptoService or KeyManager not available.");
+                    // Сообщения останутся в исходном (возможно, зашифрованном) виде
+                    // Можно пометить их как "не расшифровано"
+                    for (Message msg : messages) {
+                        if (msg.getText() != null && !msg.getText().isEmpty() && !msg.isError()) { // Добавил !msg.isError()
+                             msg.setText("[Расшифровка невозможна: сервис не доступен] " + msg.getText().substring(0, Math.min(30, msg.getText().length())) + "...");
+                             msg.setError(true);
+                        }
+                    }
+                }
                 callback.accept(messages);
             } else {
                 System.err.println("ChatService: Failed to get messages for chat " + chatId + 
@@ -90,60 +131,101 @@ public class ChatService {
     }
     
     /**
-     * Отправляет сообщение асинхронно.
+     * Отправляет сообщение асинхронно с использованием end-to-end шифрования.
      * @param receiverId ID получателя или ID чата
      * @param content Текст сообщения
      * @param callback Функция обратного вызова, принимающая объект Message (успех/ошибка отправки).
      */
     public void sendMessage(String receiverId, String content, Consumer<Message> callback) {
-        com.ryumessenger.crypto.EncryptionService encryptionService = com.ryumessenger.Main.getEncryptionService();
-        if (encryptionService == null) {
-            System.err.println("ChatService: EncryptionService not available for sendMessage.");
-            if (callback != null) callback.accept(null);
+        com.ryumessenger.crypto.EncryptionService cryptoService = com.ryumessenger.Main.getEncryptionService();
+        com.ryumessenger.security.KeyManager currentUserSecurityKeyManager = com.ryumessenger.Main.getKeyManager();
+
+        if (cryptoService == null) {
+            System.err.println("ChatService: crypto.EncryptionService not available for sendMessage.");
+            handleSendError(null, content, receiverId, "Client configuration error (CryptoService missing)", callback);
+            return;
+        }
+        if (currentUserSecurityKeyManager == null) {
+            System.err.println("ChatService: security.KeyManager not available for sendMessage.");
+            handleSendError(null, content, receiverId, "Client configuration error (SecurityKeyManager missing)", callback);
             return;
         }
 
-        // Проверяем, является ли receiverId идентификатором чата (формат id1-id2)
-        String actualReceiverId = receiverId;
+        String actualReceiverIdStr = receiverId;
         if (receiverId.contains("-")) {
-            // Получаем ID партнера из идентификатора чата
             String[] parts = receiverId.split("-");
-            int currentUserId = com.ryumessenger.Main.getCurrentUser().getId();
-            actualReceiverId = (Integer.parseInt(parts[0]) == currentUserId) ? parts[1] : parts[0];
+            // Предполагаем, что ID текущего пользователя - строка
+            String currentUserIdStr = String.valueOf(com.ryumessenger.Main.getCurrentUser().getId());
+            actualReceiverIdStr = parts[0].equals(currentUserIdStr) ? parts[1] : parts[0];
         }
+        final String finalActualReceiverIdStr = actualReceiverIdStr;
 
-        String encryptedReceiverIdPayload = encryptionService.encryptUserIdForServerPayload(actualReceiverId);
+        // Шифруем ID получателя для сервера (для маршрутизации)
+        String encryptedReceiverIdPayload = cryptoService.encryptUserIdForServerPayload(finalActualReceiverIdStr);
         if (encryptedReceiverIdPayload == null) {
             System.err.println("ChatService: Failed to encrypt receiver_id for sendMessage.");
-            if (callback != null) callback.accept(null);
+            handleSendError(null, content, receiverId, "Failed to encrypt receiver ID", callback);
             return;
         }
 
-        String encryptedMessagePayload = encryptionService.encryptForServer(content);
-        if (encryptedMessagePayload == null) {
-            System.err.println("ChatService: Failed to encrypt message content for sendMessage.");
-            if (callback != null) callback.accept(null);
-            return;
-        }
-
-        apiClient.sendMessage(encryptedReceiverIdPayload, encryptedMessagePayload, response -> {
-            if (response.isSuccess() && response.getJson() != null) {
-                Message message = Message.fromJson(response.getJson());
-                callback.accept(message);
-            } else {
-                System.err.println("ChatService: Failed to send message to receiver " + receiverId + ". Status: " + response.getStatusCode() + ", Body: " + response.getBody());
-                // Создаем новое сообщение со статусом "ошибка" вместо возврата null
-                Message failedMessage = new Message(
-                    null,  // id будет null, так как сообщение не сохранено на сервере
-                    content,  // текст сообщения сохраняем как есть
-                    System.currentTimeMillis(),
-                    true,  // отправлено текущим пользователем
-                    receiverId  // chatId = receiverId (или может быть ID чата)
-                );
-                failedMessage.setStatus(Message.MessageStatus.FAILED);
-                callback.accept(failedMessage);
+        // 1. Получаем публичные ключи получателя
+        apiClient.fetchUserPublicKeys(finalActualReceiverIdStr, recipientPublicKeys -> {
+            if (recipientPublicKeys == null) {
+                System.err.println("ChatService: Failed to fetch public keys for receiver " + finalActualReceiverIdStr);
+                handleSendError(null, content, receiverId, "Failed to fetch recipient's public keys", callback);
+                return;
             }
+
+            // 2. Шифруем сообщение с использованием E2E
+            String e2eEncryptedMessagePayload = cryptoService.encryptForUser(content, recipientPublicKeys, currentUserSecurityKeyManager);
+
+            if (e2eEncryptedMessagePayload == null) {
+                System.err.println("ChatService: Failed to E2E encrypt message content for sendMessage.");
+                handleSendError(null, content, receiverId, "Failed to encrypt message (E2E)", callback);
+                return;
+            }
+            
+            System.out.println("ChatService: E2E Encrypted Payload for user " + finalActualReceiverIdStr + ": " + e2eEncryptedMessagePayload.substring(0, Math.min(100, e2eEncryptedMessagePayload.length())) + "...");
+
+
+            // 3. Отправляем на сервер
+            // ApiClient.sendMessage ожидает (encryptedReceiverIdPayload, encryptedMessagePayload, callback)
+            // Теперь encryptedMessagePayload - это наш e2eEncryptedMessagePayload
+            apiClient.sendMessage(encryptedReceiverIdPayload, e2eEncryptedMessagePayload, response -> {
+                if (response.isSuccess() && response.getJson() != null) {
+                    Message message = Message.fromJson(response.getJson());
+                    // Убедимся, что chatID установлен правильно, если сервер его не возвращает
+                    if (message != null && (message.getChatId() == null || message.getChatId().isEmpty())) {
+                        message.setChatId(receiverId); // Используем исходный receiverId (может быть ID чата)
+                    }
+                    if (message != null) {
+                        message.setStatus(Message.MessageStatus.SENT); // Устанавливаем статус SENT после успешной отправки
+                    }
+                    callback.accept(message);
+                } else {
+                    System.err.println("ChatService: Failed to send message to receiver " + receiverId + ". Status: " + response.getStatusCode() + ", Body: " + response.getBody());
+                    handleSendError(null, content, receiverId, response.getErrorMessage(), callback);
+                }
+            });
         });
+    }
+
+    // Вспомогательный метод для обработки ошибок отправки
+    private void handleSendError(String messageId, String originalContent, String chatId, String errorMessage, Consumer<Message> callback) {
+        if (callback == null) return;
+        
+        Message failedMessage = new Message(
+            messageId, // Может быть null, если ID еще не присвоен
+            originalContent,
+            System.currentTimeMillis(),
+            true, // isFromCurrentUser
+            chatId 
+        );
+        failedMessage.setStatus(Message.MessageStatus.FAILED);
+        // Можно добавить поле для текста ошибки в Message, если нужно отображать его в UI
+        // failedMessage.setErrorDetails(errorMessage); 
+        System.err.println("ChatService Send Error: " + errorMessage);
+        callback.accept(failedMessage);
     }
 
     public void deleteMessage(String messageId, Consumer<Boolean> callback) {

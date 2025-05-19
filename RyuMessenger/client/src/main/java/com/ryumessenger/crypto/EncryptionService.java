@@ -1,23 +1,51 @@
 package com.ryumessenger.crypto;
 
 import java.math.BigInteger;
-import java.util.HashMap;
-import java.util.Map;
+import java.nio.charset.StandardCharsets;
+import java.util.Base64;
 
+// Java Security API
+import java.security.KeyPair;
+import java.security.KeyFactory;
+import java.security.MessageDigest;
+import java.security.NoSuchAlgorithmException;
+import java.security.NoSuchProviderException;
+import java.security.PublicKey;
+import java.security.SecureRandom;
+import java.security.InvalidKeyException;
+import java.security.InvalidAlgorithmParameterException;
+import java.security.spec.InvalidKeySpecException;
+import javax.crypto.BadPaddingException;
+import javax.crypto.Cipher;
+import javax.crypto.IllegalBlockSizeException;
+import javax.crypto.KeyAgreement;
+import javax.crypto.Mac;
+import javax.crypto.NoSuchPaddingException;
+import javax.crypto.SecretKey;
+import javax.crypto.interfaces.DHPublicKey;
+import javax.crypto.spec.DHPublicKeySpec;
+import javax.crypto.spec.GCMParameterSpec;
+import javax.crypto.spec.SecretKeySpec;
+
+// JSON
+import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
-import org.json.JSONArray;
 
+// Проектные классы
 import com.ryumessenger.ui.CryptoLogWindow;
+import com.ryumessenger.model.UserPublicKeys;
+
+import java.security.interfaces.RSAPrivateKey; // Импорт для RSAPrivateKey
 
 public class EncryptionService {
     private final KeyManager clientKeyManager;
     private RSA.PublicKey serverRsaPublicKey; // Будет получен от сервера
     private RSA clientRsaInstance;
     
-    // Кэш для предотвращения повторного дешифрования одних и тех же данных
-    private final Map<String, String> decryptionCache = new HashMap<>();
-    private static final int MAX_CACHE_SIZE = 50;
+    private static final String HMAC_ALGORITHM = "HmacSHA256";
+    private static final int MAX_MESSAGE_LENGTH = 4096;
+    private static final long MESSAGE_TIMEOUT_MS = 300000; // 5 минут
 
     public EncryptionService(KeyManager clientKeyManager) {
         this.clientKeyManager = clientKeyManager;
@@ -48,297 +76,102 @@ public class EncryptionService {
      * не сериализованный и не зашифрованный.
      */
     public String encryptForServer(String plaintext) {
+        if (plaintext == null || plaintext.length() > MAX_MESSAGE_LENGTH) {
+            throw new IllegalArgumentException("Invalid message length");
+        }
+
         CryptoLogWindow.logOperation("Начинаем шифрование", "Исходный текст: " + plaintext);
         
         if (serverRsaPublicKey == null) {
-            System.err.println("Публичный RSA-ключ сервера не установлен. Невозможно зашифровать для сервера.");
-            CryptoLogWindow.logOperation("Ошибка", "Публичный RSA-ключ сервера не установлен");
-            return null;
+            throw new IllegalStateException("Публичный RSA-ключ сервера не установлен");
         }
         if (clientKeyManager.getClientRsaKeyPair() == null) {
-            System.err.println("RSA-ключи клиента недоступны. Операция невозможна.");
-            CryptoLogWindow.logOperation("Ошибка", "RSA-ключи клиента недоступны");
-            return null;
+            throw new IllegalStateException("RSA-ключи клиента недоступны");
         }
-        
-        // Генерируем случайные ключи для афинного шифрования с ASCII
-        // Используем 16 разных коэффициентов a и b для каждой позиции
-        int keyLength = 16;
-        int[] bValues = new int[keyLength];
-        int[] aValues = new int[keyLength];
-        int[] validAValues = AffineCipher.getValidAValues();
-        
-        CryptoLogWindow.logOperation("Генерация ключей для афинного шифрования", 
-            "Создаем массивы из " + keyLength + " коэффициентов a и b");
-        
-        // Заполняем массивы случайными значениями
-        java.util.Random random = new java.util.Random();
-        for (int i = 0; i < keyLength; i++) {
-            // Для a выбираем из допустимых значений (взаимно простых с 256)
-            int index = random.nextInt(validAValues.length);
-            aValues[i] = validAValues[index];
-            
-            // Для b можно использовать любое значение от 0 до 255
-            bValues[i] = random.nextInt(256);
-            
-            CryptoLogWindow.logOperation("Генерация ключей для позиции " + i, 
-                "a=" + aValues[i] + " (взаимно простой с 256), b=" + bValues[i]);
-        }
-        
-        // Создаем афинный шифр с разными коэффициентами a и b для разных позиций
-        AffineCipher affineCipher = new AffineCipher(aValues, bValues);
-        
-        CryptoLogWindow.logOperation("Шифруем текст афинным шифром", 
-            "Используем ASCII с модулем m=256");
-        
-        String affineCipherText = affineCipher.encrypt(plaintext);
-        CryptoLogWindow.logOperation("Результат афинного шифрования", affineCipherText);
-        
-        JSONObject payload = new JSONObject();
+
         try {
-            // Добавляем зашифрованный текст
-            payload.put("cipher_text", affineCipherText);
+            // Добавляем временную метку и случайный nonce
+            JSONObject messageData = new JSONObject();
+            messageData.put("content", plaintext);
+            messageData.put("timestamp", System.currentTimeMillis());
+            messageData.put("nonce", generateNonce());
             
-            // Добавляем массив коэффициентов a
-            JSONArray aValuesArray = new JSONArray();
-            for (int a : aValues) {
-                aValuesArray.put(a);
-            }
+            String messageJson = messageData.toString();
             
-            // Добавляем массив коэффициентов b
-            JSONArray bValuesArray = new JSONArray();
-            for (int b : bValues) {
-                bValuesArray.put(b);
-            }
+            // Вычисляем HMAC для проверки целостности
+            String hmac = calculateHMAC(messageJson);
             
-            // Создаем объект с параметрами афинного шифра
-            JSONObject affineParams = new JSONObject();
-            affineParams.put("a_values", aValuesArray);
-            affineParams.put("b_values", bValuesArray);
-            affineParams.put("m", 256); // ASCII
+            // Добавляем HMAC в сообщение
+            JSONObject finalMessage = new JSONObject();
+            finalMessage.put("data", messageJson);
+            finalMessage.put("hmac", hmac);
             
-            // Добавляем параметры и модуль шифрования
-            payload.put("affine_params", affineParams);
-            payload.put("cipher_type", "ascii_affine_multi_a_b");
+            // Шифруем финальное сообщение
+            RSA serverRsaEncrypter = new RSA();
+            serverRsaEncrypter.setPublicKey(serverRsaPublicKey.n, serverRsaPublicKey.e);
             
-            CryptoLogWindow.logOperation("Создаем JSON-пакет", payload.toString());
-        } catch (JSONException e) {
-            System.err.println("Ошибка при создании JSON для шифрования на сервер: " + e.getMessage());
-            CryptoLogWindow.logOperation("Ошибка", "Ошибка при создании JSON: " + e.getMessage());
-            return null;
-        }
-        
-        RSA serverRsaEncrypter = new RSA();
-        serverRsaEncrypter.setPublicKey(serverRsaPublicKey.n, serverRsaPublicKey.e);
-        
-        CryptoLogWindow.logOperation("Шифруем открытым ключом RSA сервера", 
-            "n=" + serverRsaPublicKey.n.toString().substring(0, 20) + "..., e=" + serverRsaPublicKey.e);
-        
-        try {
-            String encrypted = serverRsaEncrypter.encryptTextChunked(payload.toString());
+            String encrypted = serverRsaEncrypter.encryptTextChunked(finalMessage.toString());
             CryptoLogWindow.logOperation("Результат RSA шифрования", 
                 encrypted.substring(0, Math.min(50, encrypted.length())) + "...");
+            
             return encrypted;
         } catch (Exception e) {
-            System.err.println("Ошибка RSA-шифрования данных для сервера: " + e.getMessage());
-            e.printStackTrace();
-            CryptoLogWindow.logOperation("Ошибка", "Ошибка RSA-шифрования: " + e.getMessage());
-            return null;
+            CryptoLogWindow.logOperation("Ошибка", "Ошибка шифрования: " + e.getMessage());
+            throw new RuntimeException("Ошибка шифрования", e);
         }
     }
 
-    /**
-     * Расшифровывает данные, полученные от сервера.
-     * Ожидается, что данные были зашифрованы по схеме: Аффинный_сервера -> RSA_клиента.
-     * 1. Расшифровывает входящую строку приватным RSA ключом КЛИЕНТА.
-     * 2. Парсит полученный JSON: {cipher_text, affine_params (сервера), cipher_type}
-     * 3. Расшифровывает cipher_text Аффинным шифром, используя параметры сервера.
-     * @param rsaEncryptedPayload Строка, зашифрованная RSA от сервера.
-     * @return Расшифрованный исходный текст, или null при ошибке.
-     */
-    public String decryptFromServer(String rsaEncryptedPayload) {
-        // Добавляем "отпечаток" зашифрованной строки для логирования и отладки
-        String payloadHash = String.valueOf(rsaEncryptedPayload.hashCode());
-        
-        // Проверяем кэш расшифровки
-        if (decryptionCache.containsKey(payloadHash)) {
-            CryptoLogWindow.logOperation("Используем кэш расшифровки", "Хэш: " + payloadHash);
-            return decryptionCache.get(payloadHash);
-        }
-        
-        CryptoLogWindow.logOperation("Начинаем расшифровку", "Хэш зашифрованных данных: " + payloadHash);
-        
-        // Проверка входных данных
-        if (rsaEncryptedPayload == null || rsaEncryptedPayload.isEmpty()) {
-            CryptoLogWindow.logOperation("Ошибка", "Получены пустые зашифрованные данные");
-            return null;
-        }
-        
-        if (clientKeyManager.getClientRsaKeyPair() == null) {
-            System.err.println("RSA-ключи клиента недоступны. Невозможно расшифровать данные от сервера.");
-            CryptoLogWindow.logOperation("Ошибка", "RSA-ключи клиента недоступны");
-            return null;
-        }
-        
-        String decryptedPayloadJson;
-        try {
-            // Используем clientRsaInstance, у которого уже установлены ключи клиента
-            CryptoLogWindow.logOperation("Расшифровываем приватным RSA ключом клиента", "");
-            decryptedPayloadJson = this.clientRsaInstance.decryptTextChunked(rsaEncryptedPayload);
-            CryptoLogWindow.logOperation("Результат RSA расшифровки", decryptedPayloadJson);
-        } catch (Exception e) {
-            System.err.println("Error RSA decrypting payload from server: " + e.getMessage());
-            e.printStackTrace();
-            CryptoLogWindow.logOperation("Ошибка", "Ошибка RSA расшифровки: " + e.getMessage());
-            return null;
+    public String decryptFromServer(String encryptedData) {
+        if (encryptedData == null || encryptedData.isEmpty()) {
+            throw new IllegalArgumentException("Пустые данные для расшифровки");
         }
 
         try {
-            JSONObject payload = new JSONObject(decryptedPayloadJson);
-            String cipherText = payload.getString("cipher_text");
-            JSONObject affineParamsJson = payload.getJSONObject("affine_params");
-            String cipherType = payload.optString("cipher_type", "default");
-
-            CryptoLogWindow.logOperation("Извлечен тип шифра", cipherType);
+            // Расшифровываем данные
+            String decrypted = clientRsaInstance.decryptTextChunked(encryptedData);
+            JSONObject message = new JSONObject(decrypted);
             
-            // Проверяем тип шифрования
-            if ("ascii_affine_multi_a_b".equals(cipherType)) {
-                // Для нового типа шифрования с разными a и b для разных позиций
-                return decryptAsciiAffineMultiAB(cipherText, affineParamsJson, payloadHash);
-            } else if ("ascii_affine_multi_a".equals(cipherType)) {
-                // Для типа шифрования с разными a для разных позиций
-                return decryptAsciiAffineMultiA(cipherText, affineParamsJson, payloadHash);
-            } else {
-                // Для обратной совместимости (старый формат с языками RU/EN)
-                return decryptLegacyAffine(cipherText, affineParamsJson, payload.getString("lang"), payloadHash);
+            // Проверяем наличие всех необходимых полей
+            if (!message.has("data") || !message.has("hmac")) {
+                throw new IllegalArgumentException("Некорректный формат сообщения");
             }
-        } catch (JSONException e) {
-            System.err.println("Ошибка при разборе JSON-данных от сервера: " + e.getMessage());
-            System.err.println("Полученная JSON-строка: " + decryptedPayloadJson.substring(0, Math.min(decryptedPayloadJson.length(), 200)));
-            CryptoLogWindow.logOperation("Ошибка", "Ошибка при разборе JSON: " + e.getMessage());
-            return null;
+            
+            String data = message.getString("data");
+            String receivedHmac = message.getString("hmac");
+            
+            // Проверяем HMAC
+            String calculatedHmac = calculateHMAC(data);
+            if (!MessageDigest.isEqual(calculatedHmac.getBytes(), receivedHmac.getBytes())) {
+                throw new SecurityException("Ошибка проверки целостности данных");
+            }
+            
+            // Проверяем временную метку
+            JSONObject dataObj = new JSONObject(data);
+            long timestamp = dataObj.getLong("timestamp");
+            if (System.currentTimeMillis() - timestamp > MESSAGE_TIMEOUT_MS) {
+                throw new SecurityException("Сообщение устарело");
+            }
+            
+            return dataObj.getString("content");
         } catch (Exception e) {
-            System.err.println("Ошибка при расшифровке данных от сервера: " + e.getMessage());
-            e.printStackTrace();
             CryptoLogWindow.logOperation("Ошибка", "Ошибка расшифровки: " + e.getMessage());
-            return null;
+            throw new RuntimeException("Ошибка расшифровки", e);
         }
     }
 
-    /**
-     * Расшифровывает данные с использованием афинного шифра с ASCII и разными коэффициентами a
-     */
-    private String decryptAsciiAffineMultiA(String cipherText, JSONObject affineParamsJson, String payloadHash) {
-        try {
-            // Получаем список коэффициентов a
-            JSONArray aValuesArray = affineParamsJson.getJSONArray("a_values");
-            int[] aValues = new int[aValuesArray.length()];
-            for (int i = 0; i < aValuesArray.length(); i++) {
-                aValues[i] = aValuesArray.getInt(i);
-            }
-            
-            int[] bValues = new int[aValues.length];
-            JSONArray bValuesArray = affineParamsJson.getJSONArray("b_values");
-            for (int i = 0; i < bValuesArray.length(); i++) {
-                bValues[i] = bValuesArray.getInt(i);
-            }
-            
-            CryptoLogWindow.logOperation("Извлечены параметры для ASCII Affine Multi-A", 
-                "Количество коэффициентов a: " + aValues.length + ", количество коэффициентов b: " + bValues.length);
-            
-            // Создаем афинный шифр с извлеченными параметрами
-            AffineCipher affineDecrypter = new AffineCipher(aValues, bValues);
-            
-            // Расшифровываем
-            String decryptedText = affineDecrypter.decrypt(cipherText);
-            CryptoLogWindow.logOperation("Результат расшифровки ASCII Affine Multi-A", decryptedText);
-            
-            // Добавляем результат в кэш
-            addToDecryptionCache(payloadHash, decryptedText);
-            
-            return decryptedText;
-        } catch (Exception e) {
-            CryptoLogWindow.logOperation("Ошибка расшифровки ASCII Affine Multi-A", e.getMessage());
-            throw e; // Пробрасываем исключение дальше
-        }
+    private String generateNonce() {
+        byte[] nonce = new byte[16];
+        new SecureRandom().nextBytes(nonce);
+        return Base64.getEncoder().encodeToString(nonce);
     }
 
-    /**
-     * Расшифровывает данные с использованием старого формата афинного шифра (для обратной совместимости)
-     */
-    private String decryptLegacyAffine(String cipherText, JSONObject affineParamsJson, String lang, String payloadHash) {
-        try {
-            int serverA = affineParamsJson.getInt("a");
-            int serverB = affineParamsJson.getInt("b");
-            
-            CryptoLogWindow.logOperation("Извлечены параметры Legacy Affine", 
-                "a=" + serverA + ", b=" + serverB + ", язык=" + lang);
-            
-            // Создаем обратно-совместимый экземпляр AffineCipher
-            AffineCipher legacyDecrypter = new AffineCipher(serverA, serverB);
-            
-            String decryptedText = legacyDecrypter.decrypt(cipherText);
-            CryptoLogWindow.logOperation("Результат расшифровки Legacy Affine", decryptedText);
-            
-            // Добавляем результат в кэш
-            addToDecryptionCache(payloadHash, decryptedText);
-            
-            return decryptedText;
-        } catch (Exception e) {
-            CryptoLogWindow.logOperation("Ошибка расшифровки Legacy Affine", e.getMessage());
-            throw e; // Пробрасываем исключение дальше
-        }
-    }
-
-    /**
-     * Расшифровывает данные с использованием афинного шифра с ASCII, разными коэффициентами a и разными b
-     */
-    private String decryptAsciiAffineMultiAB(String cipherText, JSONObject affineParamsJson, String payloadHash) {
-        try {
-            // Получаем список коэффициентов a
-            JSONArray aValuesArray = affineParamsJson.getJSONArray("a_values");
-            int[] aValues = new int[aValuesArray.length()];
-            for (int i = 0; i < aValuesArray.length(); i++) {
-                aValues[i] = aValuesArray.getInt(i);
-            }
-            
-            // Получаем список коэффициентов b
-            JSONArray bValuesArray = affineParamsJson.getJSONArray("b_values");
-            int[] bValues = new int[bValuesArray.length()];
-            for (int i = 0; i < bValuesArray.length(); i++) {
-                bValues[i] = bValuesArray.getInt(i);
-            }
-            
-            CryptoLogWindow.logOperation("Извлечены параметры для ASCII Affine Multi-A-B", 
-                "Количество коэффициентов a: " + aValues.length + ", количество коэффициентов b: " + bValues.length);
-            
-            // Создаем афинный шифр с извлеченными параметрами
-            AffineCipher affineDecrypter = new AffineCipher(aValues, bValues);
-            
-            // Расшифровываем
-            String decryptedText = affineDecrypter.decrypt(cipherText);
-            CryptoLogWindow.logOperation("Результат расшифровки ASCII Affine Multi-A-B", decryptedText);
-            
-            // Добавляем результат в кэш
-            addToDecryptionCache(payloadHash, decryptedText);
-            
-            return decryptedText;
-        } catch (Exception e) {
-            CryptoLogWindow.logOperation("Ошибка расшифровки ASCII Affine Multi-A-B", e.getMessage());
-            throw e; // Пробрасываем исключение дальше
-        }
-    }
-
-    /**
-     * Добавляет результат расшифровки в кэш
-     */
-    private void addToDecryptionCache(String payloadHash, String decryptedText) {
-        // Если кэш слишком большой, удаляем случайную запись
-        if (decryptionCache.size() >= MAX_CACHE_SIZE) {
-            String keyToRemove = decryptionCache.keySet().iterator().next();
-            decryptionCache.remove(keyToRemove);
-        }
-        decryptionCache.put(payloadHash, decryptedText);
+    private String calculateHMAC(String data) throws Exception {
+        byte[] keyBytes = clientKeyManager.getClientRsaPrivateKey().d.toByteArray(); // Используем d напрямую
+        SecretKeySpec signingKey = new SecretKeySpec(keyBytes, HMAC_ALGORITHM);
+        Mac mac = Mac.getInstance(HMAC_ALGORITHM);
+        mac.init(signingKey);
+        byte[] rawHmac = mac.doFinal(data.getBytes(StandardCharsets.UTF_8));
+        return Base64.getEncoder().encodeToString(rawHmac);
     }
 
     /**
@@ -911,54 +744,256 @@ public class EncryptionService {
         }
         
         try {
-            // Расшифровываем пакет приватным ключом RSA клиента
+            // Расшифровываем пакет приватным ключом RSA клиента (т.к. пакет шифровался ключом сервера для НАС)
             String decryptedPackageJson = clientRsaInstance.decryptTextChunked(encryptedPackage);
             JSONObject packagePayload = new JSONObject(decryptedPackageJson);
             
-            // Извлекаем зашифрованный общий секрет
-            String encryptedSecret = packagePayload.getString("encrypted_shared_secret");
+            String messageType = packagePayload.optString("message_type", "");
+            if (!"shared_secret_transfer".equals(messageType)) {
+                CryptoLogWindow.logOperation("Ошибка", "Неверный тип сообщения в пакете, ожидался shared_secret_transfer");
+                return null;
+            }
+
+            String encryptedSecretPayload = packagePayload.getString("encrypted_shared_secret");
             
-            // Получаем информацию об отправителе
-            String senderPublicKeyN = packagePayload.getString("sender_public_key_n");
-            String senderPublicKeyE = packagePayload.getString("sender_public_key_e");
+            // Расшифровываем сам общий секрет (он был зашифрован RSA ключом ТЕКУЩЕГО пользователя)
+            String decryptedSecretJson = clientRsaInstance.decryptTextChunked(encryptedSecretPayload);
+            JSONObject secretPayload = new JSONObject(decryptedSecretJson);
             
-            CryptoLogWindow.logOperation("Получен пакет с общим секретом", 
-                "Отправитель: " + senderPublicKeyN.substring(0, 8) + "..., e=" + senderPublicKeyE);
-            
-            // Проверяем корректность публичного ключа отправителя
-            try {
-                RSA.PublicKey senderPublicKey = new RSA.PublicKey(
-                    new BigInteger(senderPublicKeyN), 
-                    new BigInteger(senderPublicKeyE));
-                
-                // Сохраняем информацию об отправителе (опционально)
-                // Здесь можно было бы добавить отправителя в список доверенных контактов
-                
-                // Проверка на корректность открытой экспоненты (должна быть нечетной и > 1)
-                if (senderPublicKey.e.compareTo(BigInteger.ONE) <= 0 || 
-                    senderPublicKey.e.mod(BigInteger.TWO).equals(BigInteger.ZERO)) {
-                    CryptoLogWindow.logOperation("Предупреждение", 
-                        "Необычная экспонента в публичном ключе отправителя: " + senderPublicKey.e);
-                }
-            } catch (Exception e) {
-                CryptoLogWindow.logOperation("Предупреждение", 
-                    "Невалидный формат публичного ключа отправителя: " + e.getMessage());
-                // Продолжаем выполнение, так как это не критическая ошибка
+            BigInteger sharedSecretValue = new BigInteger(secretPayload.getString("shared_secret"));
+            long timestamp = secretPayload.getLong("timestamp");
+            // String senderId = secretPayload.getString("sender_id"); // Можно использовать для логгирования
+
+            if (System.currentTimeMillis() - timestamp > MESSAGE_TIMEOUT_MS) {
+                CryptoLogWindow.logOperation("Ошибка", "Пакет с общим секретом устарел");
+                return null;
             }
             
-            // Расшифровываем общий секрет
-            BigInteger sharedSecret = decryptSharedSecret(encryptedSecret);
+            CryptoLogWindow.logOperation("Общий секрет извлечен", 
+                "Значение секрета (начало): " + sharedSecretValue.toString().substring(0, Math.min(10, sharedSecretValue.toString().length())) + "...");
             
-            if (sharedSecret != null) {
-                CryptoLogWindow.logOperation("Общий секрет успешно получен", 
-                    "Первые 8 символов: " + sharedSecret.toString().substring(0, 
-                    Math.min(8, sharedSecret.toString().length())) + "...");
-            }
-            
-            return sharedSecret;
+            return sharedSecretValue; 
         } catch (Exception e) {
             System.err.println("Ошибка при обработке пакета с общим секретом: " + e.getMessage());
-            CryptoLogWindow.logOperation("Ошибка", "Не удалось обработать пакет: " + e.getMessage());
+            e.printStackTrace();
+            CryptoLogWindow.logOperation("Ошибка обработки пакета", e.getMessage());
+            return null;
+        }
+    }
+
+    /**
+     * Шифрует текстовое сообщение для указанного получателя согласно схеме:
+     * 1. Аффинное шифрование текста (случайные коэффициенты a_arr, b_arr).
+     * 2. Выработка общего DH-секрета с получателем.
+     * 3. Шифрование (a_arr, b_arr) этим DH-секретом (например, AES-GCM, пока упростим).
+     * 4. Шифрование аффинного шифртекста публичным RSA-ключом получателя.
+     * 5. Формирование JSON-пакета со всеми компонентами.
+     *
+     * @param plaintext Исходный текст сообщения.
+     * @param recipientPublicKeys Публичные ключи получателя (RSA и DH-Y).
+     * @param keyManagerSecurity KeyManager текущего пользователя (отправителя) - com.ryumessenger.security.KeyManager.
+     * @return JSON-строка с зашифрованным пакетом или null в случае ошибки.
+     */
+    public String encryptForUser(String plaintext, UserPublicKeys recipientPublicKeys, com.ryumessenger.security.KeyManager keyManagerSecurity) {
+        if (plaintext == null || recipientPublicKeys == null || keyManagerSecurity == null) {
+            CryptoLogWindow.logOperation("Ошибка encryptForUser", "Некорректные входные параметры.");
+            return null;
+        }
+
+        try {
+            CryptoLogWindow.logOperation("encryptForUser", "Начало шифрования для пользователя: " + recipientPublicKeys.getRsaModulus().toString().substring(0,10) + "...");
+
+            AffineCipher affineCipher = AffineCipher.createWithRandomKeys(16);
+            String affineCiphertext = affineCipher.encrypt(plaintext);
+            CryptoLogWindow.logOperation("encryptForUser", "Текст зашифрован афинным шифром.");
+
+            int[] aValues = affineCipher.getAValues();
+            int[] bValues = affineCipher.getBValues();
+            JSONObject affineParamsJson = new JSONObject();
+            JSONArray aJsonArray = new JSONArray();
+            for (int a : aValues) aJsonArray.put(a);
+            JSONArray bJsonArray = new JSONArray();
+            for (int b : bValues) bJsonArray.put(b);
+            affineParamsJson.put("a_arr", aJsonArray);
+            affineParamsJson.put("b_arr", bJsonArray);
+            String serializedAffineParams = affineParamsJson.toString();
+
+            if (!keyManagerSecurity.areDHParametersSet()) {
+                CryptoLogWindow.logOperation("Ошибка encryptForUser", "DH параметры P,G не установлены у отправителя.");
+                return null;
+            }
+            KeyPair senderDhKeyPair = keyManagerSecurity.getDhKeyPair(); 
+            if (senderDhKeyPair == null) {
+                 CryptoLogWindow.logOperation("Ошибка encryptForUser", "DH KeyPair отправителя не инициализирован.");
+                 return null; 
+            }
+
+            KeyFactory dhKeyFactory = KeyFactory.getInstance("DH", "BC");
+            DHPublicKeySpec recipientDhPublicSpec = new DHPublicKeySpec(
+                recipientPublicKeys.getDhPublicKeyY(), 
+                keyManagerSecurity.getClientDhP(),
+                keyManagerSecurity.getClientDhG()
+            );
+            PublicKey recipientDhPublicKeyJava = dhKeyFactory.generatePublic(recipientDhPublicSpec);
+
+            KeyAgreement keyAgreement = KeyAgreement.getInstance("DH", "BC");
+            keyAgreement.init(senderDhKeyPair.getPrivate());
+            keyAgreement.doPhase(recipientDhPublicKeyJava, true);
+            byte[] sharedDhSecret = keyAgreement.generateSecret();
+            CryptoLogWindow.logOperation("encryptForUser", "Общий DH-секрет вычислен.");
+
+            SecretKey aesKey = new SecretKeySpec(sharedDhSecret, 0, 32, "AES"); 
+            Cipher aesCipher = Cipher.getInstance("AES/GCM/NoPadding", "BC");
+            byte[] iv = new byte[12]; 
+            new SecureRandom().nextBytes(iv);
+            GCMParameterSpec gcmSpec = new GCMParameterSpec(128, iv); 
+
+            aesCipher.init(Cipher.ENCRYPT_MODE, aesKey, gcmSpec);
+            byte[] encryptedAffineParamsBytes = aesCipher.doFinal(serializedAffineParams.getBytes(StandardCharsets.UTF_8));
+            String encryptedAffineParamsB64 = Base64.getEncoder().encodeToString(encryptedAffineParamsBytes);
+            String ivB64 = Base64.getEncoder().encodeToString(iv);
+            CryptoLogWindow.logOperation("encryptForUser", "Аффинные коэффициенты зашифрованы AES-GCM.");
+
+            com.ryumessenger.crypto.RSA rsaEncrypter = new com.ryumessenger.crypto.RSA();
+            rsaEncrypter.setPublicKey(recipientPublicKeys.getRsaModulus(), recipientPublicKeys.getRsaExponent());
+            String rsaEncryptedAffineCiphertext = rsaEncrypter.encryptTextChunked(affineCiphertext);
+            CryptoLogWindow.logOperation("encryptForUser", "Аффинный шифртекст зашифрован RSA получателя.");
+
+            JSONObject finalPayload = new JSONObject();
+            finalPayload.put("rsa_encrypted_text", rsaEncryptedAffineCiphertext);
+            finalPayload.put("encrypted_coeffs_package", new JSONObject()
+                .put("coeffs_b64", encryptedAffineParamsB64)
+                .put("iv_b64", ivB64)
+                .put("cipher_algo", "AES/GCM/NoPadding")
+            );
+            DHPublicKey senderDhPublicKeyObj = (DHPublicKey) senderDhKeyPair.getPublic();
+            finalPayload.put("sender_dh_public_key_y", senderDhPublicKeyObj.getY().toString());
+            finalPayload.put("message_content_type", "e2e_v1"); 
+
+            CryptoLogWindow.logOperation("encryptForUser", "Финальный пакет сформирован.");
+            return finalPayload.toString();
+
+        } catch (NoSuchAlgorithmException | NoSuchProviderException | InvalidKeySpecException | InvalidKeyException | NoSuchPaddingException | IllegalBlockSizeException | BadPaddingException | InvalidAlgorithmParameterException | JSONException e) {
+            CryptoLogWindow.logOperation("Ошибка encryptForUser", "Криптографическое исключение или JSON: " + e.getMessage());
+            e.printStackTrace();
+            return null;
+        } catch (Exception e) { 
+            CryptoLogWindow.logOperation("Ошибка encryptForUser", "Непредвиденное общее исключение: " + e.getMessage());
+            e.printStackTrace();
+            return null;
+        }
+    }
+
+    /**
+     * Расшифровывает сообщение, полученное от другого пользователя.
+     * 1. Разбирает JSON-пакет.
+     * 2. Извлекает публичный DH-ключ отправителя.
+     * 3. Вычисляет общий DH-секрет с отправителем.
+     * 4. Расшифровывает пакет с аффинными коэффициентами (AES-GCM).
+     * 5. Расшифровывает основной текст (RSA приватным ключом получателя).
+     * 6. Расшифровывает аффинный шифртекст.
+     *
+     * @param encryptedPayload JSON-строка с зашифрованным пакетом.
+     * @param keyManagerSecurity KeyManager текущего пользователя (получателя) - com.ryumessenger.security.KeyManager.
+     * @return Исходный текст сообщения или null в случае ошибки.
+     */
+    public String decryptForUser(String encryptedPayload, com.ryumessenger.security.KeyManager keyManagerSecurity) {
+        if (encryptedPayload == null || keyManagerSecurity == null) {
+            CryptoLogWindow.logOperation("Ошибка decryptForUser", "Некорректные входные параметры.");
+            return null;
+        }
+
+        try {
+            CryptoLogWindow.logOperation("decryptForUser", "Начало расшифровки от пользователя.");
+            JSONObject payload = new JSONObject(encryptedPayload);
+
+            if (!"e2e_v1".equals(payload.optString("message_content_type"))) {
+                CryptoLogWindow.logOperation("Ошибка decryptForUser", "Неподдерживаемый тип контента сообщения.");
+                return null;
+            }
+
+            String rsaEncryptedText = payload.getString("rsa_encrypted_text");
+            JSONObject encryptedCoeffsPackage = payload.getJSONObject("encrypted_coeffs_package");
+            String coeffsB64 = encryptedCoeffsPackage.getString("coeffs_b64");
+            String ivB64 = encryptedCoeffsPackage.getString("iv_b64");
+            BigInteger senderDhPublicKeyY = new BigInteger(payload.getString("sender_dh_public_key_y"));
+
+            if (!keyManagerSecurity.areDHParametersSet()) {
+                CryptoLogWindow.logOperation("Ошибка decryptForUser", "DH параметры P,G не установлены у получателя.");
+                return null;
+            }
+            KeyPair recipientDhKeyPair = keyManagerSecurity.getDhKeyPair();
+            if (recipientDhKeyPair == null) {
+                CryptoLogWindow.logOperation("Ошибка decryptForUser", "DH KeyPair получателя не инициализирован.");
+                return null;
+            }
+
+            KeyFactory dhKeyFactory = KeyFactory.getInstance("DH", "BC");
+            DHPublicKeySpec senderDhPublicSpec = new DHPublicKeySpec(
+                senderDhPublicKeyY,
+                keyManagerSecurity.getClientDhP(), 
+                keyManagerSecurity.getClientDhG()
+            );
+            PublicKey senderDhPublicKeyJava = dhKeyFactory.generatePublic(senderDhPublicSpec);
+
+            KeyAgreement keyAgreement = KeyAgreement.getInstance("DH", "BC");
+            keyAgreement.init(recipientDhKeyPair.getPrivate());
+            keyAgreement.doPhase(senderDhPublicKeyJava, true);
+            byte[] sharedDhSecret = keyAgreement.generateSecret();
+            CryptoLogWindow.logOperation("decryptForUser", "Общий DH-секрет с отправителем вычислен.");
+
+            SecretKey aesKey = new SecretKeySpec(sharedDhSecret, 0, 32, "AES");
+            Cipher aesCipher = Cipher.getInstance("AES/GCM/NoPadding", "BC");
+            byte[] iv = Base64.getDecoder().decode(ivB64);
+            GCMParameterSpec gcmSpec = new GCMParameterSpec(128, iv);
+
+            aesCipher.init(Cipher.DECRYPT_MODE, aesKey, gcmSpec);
+            byte[] encryptedAffineParamsBytes = Base64.getDecoder().decode(coeffsB64);
+            byte[] decryptedAffineParamsBytes = aesCipher.doFinal(encryptedAffineParamsBytes);
+            String serializedAffineParams = new String(decryptedAffineParamsBytes, StandardCharsets.UTF_8);
+            CryptoLogWindow.logOperation("decryptForUser", "Аффинные коэффициенты расшифрованы.");
+
+            JSONObject affineParamsJson = new JSONObject(serializedAffineParams);
+            JSONArray aJsonArray = affineParamsJson.getJSONArray("a_arr");
+            JSONArray bJsonArray = affineParamsJson.getJSONArray("b_arr");
+            int[] aValues = new int[aJsonArray.length()];
+            int[] bValues = new int[bJsonArray.length()];
+            for (int i = 0; i < aJsonArray.length(); i++) aValues[i] = aJsonArray.getInt(i);
+            for (int i = 0; i < bJsonArray.length(); i++) bValues[i] = bJsonArray.getInt(i);
+
+            // --- 3. Расшифрование основного текста (RSA приватным ключом получателя) ---
+            java.security.PrivateKey recipientJavaRsaPrivateKey = keyManagerSecurity.getRsaPrivateKeyObject();
+            if (recipientJavaRsaPrivateKey == null) {
+                 CryptoLogWindow.logOperation("Ошибка decryptForUser", "Приватный RSA ключ получателя (java.security) не найден.");
+                 return null;
+            }
+
+            if (!(recipientJavaRsaPrivateKey instanceof RSAPrivateKey)) {
+                CryptoLogWindow.logOperation("Ошибка decryptForUser", "Приватный RSA ключ имеет неверный тип, ожидался RSAPrivateKey.");
+                return null;
+            }
+            RSAPrivateKey rsaPrivKey = (RSAPrivateKey) recipientJavaRsaPrivateKey;
+            BigInteger rsaD = rsaPrivKey.getPrivateExponent();
+            BigInteger rsaN = rsaPrivKey.getModulus();
+            
+            RSA rsaDecrypter = new RSA();
+            rsaDecrypter.setPrivateKey(rsaD, rsaN); 
+            String affineCiphertext = rsaDecrypter.decryptTextChunked(rsaEncryptedText);
+            CryptoLogWindow.logOperation("decryptForUser", "Основной текст (аффинный шифртекст) расшифрован RSA.");
+
+            AffineCipher affineCipher = new AffineCipher(aValues, bValues);
+            String plaintext = affineCipher.decrypt(affineCiphertext);
+            CryptoLogWindow.logOperation("decryptForUser", "Финальный текст расшифрован: " + plaintext.substring(0, Math.min(20, plaintext.length())) + "...");
+
+            return plaintext;
+
+        } catch (NoSuchAlgorithmException | NoSuchProviderException | InvalidKeySpecException | InvalidKeyException | NoSuchPaddingException | IllegalBlockSizeException | BadPaddingException | InvalidAlgorithmParameterException | JSONException e) {
+            CryptoLogWindow.logOperation("Ошибка decryptForUser", "Криптографическое исключение или JSON: " + e.getMessage());
+            e.printStackTrace();
+            return null;
+        } catch (Exception e) { 
+            CryptoLogWindow.logOperation("Ошибка decryptForUser", "Непредвиденное общее исключение: " + e.getMessage());
+            e.printStackTrace();
             return null;
         }
     }

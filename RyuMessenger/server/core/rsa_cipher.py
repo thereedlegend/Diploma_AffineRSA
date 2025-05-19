@@ -116,4 +116,10 @@ class RSACipher:
         try:
             return decrypted_bytes.decode('utf-8')
         except UnicodeDecodeError as e:
-            raise ValueError("Не удалось декодировать расшифрованные байты в UTF-8. Возможна проблема с чанками/расшифровкой.") 
+            raise ValueError("Не удалось декодировать расшифрованные байты в UTF-8. Возможна проблема с чанками/расшифровкой.")
+
+    def get_private_key_bytes(self) -> bytes:
+        """Возвращает приватный ключ в виде байтов для использования в HMAC."""
+        if not self.private_key:
+            raise ValueError("Private key not set")
+        return str(self.private_key).encode() 

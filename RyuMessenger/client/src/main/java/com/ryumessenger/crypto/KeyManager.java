@@ -12,6 +12,12 @@ import org.json.JSONArray;
 import org.json.JSONException;
 import org.json.JSONObject;
 
+import java.security.KeyFactory;
+import java.security.spec.RSAPublicKeySpec;
+import java.security.spec.RSAPrivateKeySpec;
+import org.bouncycastle.util.io.pem.PemObject;
+import org.bouncycastle.util.io.pem.PemWriter;
+
 public class KeyManager {
     private RSA.KeyPair clientRsaKeyPair;
     private AffineCipher clientAffineCipher; // Общий афинный шифр (вместо разных для языков)
@@ -277,40 +283,33 @@ public class KeyManager {
         }
         
         try {
-            // Сохраняем публичный ключ
-            String publicKeyData = clientRsaKeyPair.publicKey.n.toString() + "|" + clientRsaKeyPair.publicKey.e.toString();
-            String publicKeyBase64 = Base64.getEncoder().encodeToString(publicKeyData.getBytes());
-            String publicKeyPem = "-----BEGIN PUBLIC KEY-----\n" +
-                                 formatPem(publicKeyBase64) +
-                                 "-----END PUBLIC KEY-----\n";
+            KeyFactory keyFactory = KeyFactory.getInstance("RSA");
+
+            // Сохраняем публичный ключ в стандартном X.509 PEM формате
+            RSAPublicKeySpec publicKeySpec = new RSAPublicKeySpec(clientRsaKeyPair.publicKey.n, clientRsaKeyPair.publicKey.e);
+            java.security.PublicKey javaPublicKey = keyFactory.generatePublic(publicKeySpec);
+            byte[] x509EncodedPublicKey = javaPublicKey.getEncoded();
             
-            // Сохраняем приватный ключ
-            String privateKeyData = clientRsaKeyPair.privateKey.n.toString() + "|" + clientRsaKeyPair.privateKey.d.toString();
-            String privateKeyBase64 = Base64.getEncoder().encodeToString(privateKeyData.getBytes());
-            String privateKeyPem = "-----BEGIN PRIVATE KEY-----\n" +
-                                  formatPem(privateKeyBase64) +
-                                  "-----END PRIVATE KEY-----\n";
+            try (PemWriter pemWriter = new PemWriter(new FileWriter(rsaPublicPemPath))) {
+                PemObject pemObject = new PemObject("PUBLIC KEY", x509EncodedPublicKey);
+                pemWriter.writeObject(pemObject);
+            }
+
+            // Сохраняем приватный ключ в стандартном PKCS#8 PEM формате
+            RSAPrivateKeySpec privateKeySpec = new RSAPrivateKeySpec(clientRsaKeyPair.privateKey.n, clientRsaKeyPair.privateKey.d);
+            java.security.PrivateKey javaPrivateKey = keyFactory.generatePrivate(privateKeySpec);
+            byte[] pkcs8EncodedPrivateKey = javaPrivateKey.getEncoded();
+
+            try (PemWriter pemWriter = new PemWriter(new FileWriter(rsaPrivatePemPath))) {
+                PemObject pemObject = new PemObject("PRIVATE KEY", pkcs8EncodedPrivateKey);
+                pemWriter.writeObject(pemObject);
+            }
             
-            // Записываем файлы
-            Files.write(Paths.get(rsaPublicPemPath), publicKeyPem.getBytes());
-            Files.write(Paths.get(rsaPrivatePemPath), privateKeyPem.getBytes());
-            
-            System.out.println("RSA ключи сохранены в PEM-формате: " + rsaPublicPemPath + ", " + rsaPrivatePemPath);
-        } catch (IOException e) {
-            System.err.println("Ошибка при сохранении RSA ключей в PEM-формате: " + e.getMessage());
+            System.out.println("RSA ключи сохранены в СТАНДАРТНОМ PEM-формате: " + rsaPublicPemPath + ", " + rsaPrivatePemPath);
+        } catch (Exception e) { // Ловим более общий Exception, так как KeyFactory и другие могут бросать разные ошибки
+            System.err.println("Ошибка при сохранении RSA ключей в стандартном PEM-формате: " + e.getMessage());
+            e.printStackTrace(); // Для детальной отладки
         }
-    }
-    
-    /**
-     * Форматирует Base64-строку для PEM (добавляет переносы строк)
-     */
-    private String formatPem(String base64) {
-        StringBuilder formatted = new StringBuilder();
-        for (int i = 0; i < base64.length(); i += 64) {
-            int endIndex = Math.min(i + 64, base64.length());
-            formatted.append(base64.substring(i, endIndex)).append("\n");
-        }
-        return formatted.toString();
     }
 
     private void generateNewKeys() {

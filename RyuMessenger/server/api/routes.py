@@ -74,13 +74,18 @@ def get_user_id_from_token():
 def get_server_keys():
     key_manager = current_app.key_manager
     server_rsa_public_key = key_manager.get_rsa_public_key()
-    server_affine_params = key_manager.get_affine_params()
-    if server_rsa_public_key and server_affine_params:
-        return jsonify({
+    server_dh_public_key_y = key_manager.get_dh_public_key_y()
+    server_dh_parameters = key_manager.get_dh_parameters()
+
+    if server_rsa_public_key and server_dh_public_key_y and server_dh_parameters:
+        response_data = {
             "rsa_public_key": {"n": str(server_rsa_public_key[0]), "e": str(server_rsa_public_key[1])},
-            "affine_params": server_affine_params
-        }), 200
+            "dh_public_key_y": str(server_dh_public_key_y),
+            "dh_parameters": server_dh_parameters
+        }
+        return jsonify(response_data), 200
     else:
+        current_app.logger.error("Server keys (RSA, DH, or DH params) not available during /keys request.")
         return jsonify({"error": "Server keys not available"}), 500
 
 @api_bp.route('/register', methods=['POST'])

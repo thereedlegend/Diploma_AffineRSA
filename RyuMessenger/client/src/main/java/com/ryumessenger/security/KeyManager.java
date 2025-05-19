@@ -8,7 +8,6 @@ import java.security.*;
 import javax.crypto.interfaces.DHPublicKey;
 import java.security.interfaces.RSAPublicKey;
 import java.security.spec.*;
-import java.util.Map;
 import javax.crypto.KeyAgreement;
 import javax.crypto.spec.DHParameterSpec;
 import javax.crypto.spec.DHPublicKeySpec;
@@ -19,11 +18,12 @@ import org.bouncycastle.util.io.pem.PemReader;
 import org.bouncycastle.util.io.pem.PemWriter;
 
 import com.ryumessenger.util.Logger;
+import java.nio.file.Paths;
 
 /**
  * Управляет ключами клиента: RSA для асимметричного шифрования и DH для обмена секретами
  */
-public class KeyManager {
+public class KeyManager implements AutoCloseable {
     private static final String USER_DATA_DIR = "user_data";
     private static final String RSA_PRIVATE_KEY_FILE = "user_RSA_private.pem";
     private static final String RSA_PUBLIC_KEY_FILE = "user_RSA_public.pem";
@@ -35,44 +35,52 @@ public class KeyManager {
     private BigInteger serverRsaPublicKeyN;
     private BigInteger serverRsaPublicKeyE;
     
-    // Параметры аффинного шифра сервера
-    private Map<String, Object> serverAffineParams;
-    
     // Ключи DH
     private KeyPair dhKeyPair;
-    private BigInteger dhServerPublicKey;
+    private BigInteger dhServerPublicKeyY;
     private byte[] dhSharedSecret;
     
+    // Пути к файлам
+    private String userDataDirectoryPath;
+    
     // DH параметры (должны быть согласованы с сервером)
-    private static final BigInteger DH_P = new BigInteger("FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A08798E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA48361C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6955817183995497CEA956AE515D2261898FA051015728E5A8AACAA68FFFFFFFFFFFFFFFF", 16);
-    private static final BigInteger DH_G = BigInteger.valueOf(2);
+    private BigInteger clientDhP;
+    private BigInteger clientDhG;
+    private boolean dhParametersSet = false;
     
     static {
-        Security.addProvider(new BouncyCastleProvider());
+        if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
+            Security.addProvider(new BouncyCastleProvider());
+            Logger.info("BouncyCastle provider added.");
+        } else {
+            Logger.info("BouncyCastle provider already registered.");
+        }
     }
     
     public KeyManager() {
-        ensureUserDataDir();
-        // Инициализация ключей при создании экземпляра
-        try {
-            initRSAKeys();
-            initDHKeys();
-        } catch (Exception e) {
-            String errorMessage = "Критическая ошибка при инициализации ключей в KeyManager: " + e.getMessage();
-            Logger.error(errorMessage, e);
-            throw new RuntimeException(errorMessage, e);
-        }
+        this(".");
     }
-    
-    /**
-     * Гарантирует, что директория user_data существует
-     */
-    private void ensureUserDataDir() {
-        File userDataDir = new File(USER_DATA_DIR);
+
+    public KeyManager(String baseDir) {
+        this.userDataDirectoryPath = Paths.get(baseDir, USER_DATA_DIR).toString();
+        
+        File userDataDir = new File(userDataDirectoryPath);
         if (!userDataDir.exists()) {
             userDataDir.mkdirs();
-            Logger.info("Создана директория для хранения ключей пользователя: " + userDataDir.getAbsolutePath());
+            Logger.info("Создана директория для хранения ключей: " + userDataDir.getAbsolutePath());
         }
+        
+        try {
+            initRSAKeys();
+        } catch (Exception e) {
+            Logger.error("Ошибка инициализации RSA ключей клиента: " + e.getMessage(), e);
+            throw new RuntimeException("Не удалось инициализировать RSA ключи клиента", e);
+        }
+    }
+
+    @Override
+    public void close() {
+        // Нет необходимости в очистке - нет чувствительных данных в памяти
     }
     
     /**
@@ -88,8 +96,8 @@ public class KeyManager {
             Logger.info("Ключи RSA успешно загружены из PEM-файлов.");
         } else {
             // Генерируем новые ключи
-            KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA");
-            keyGen.initialize(2048);
+            KeyPairGenerator keyGen = KeyPairGenerator.getInstance("RSA", BouncyCastleProvider.PROVIDER_NAME);
+            keyGen.initialize(2048, new SecureRandom());
             rsaKeyPair = keyGen.generateKeyPair();
             
             // Сохраняем ключи
@@ -102,24 +110,41 @@ public class KeyManager {
      * Загружает или генерирует ключи DH клиента
      */
     public void initDHKeys() throws Exception {
+        if (!dhParametersSet || clientDhP == null || clientDhG == null) {
+            Logger.warn("Попытка инициализировать DH ключи клиента до установки DH параметров P и G от сервера. Инициализация отложена.");
+            return;
+        }
+
         File privateKeyFile = new File(USER_DATA_DIR, DH_PRIVATE_KEY_FILE);
         File publicKeyFile = new File(USER_DATA_DIR, DH_PUBLIC_KEY_FILE);
         
         if (privateKeyFile.exists() && publicKeyFile.exists()) {
-            // Загружаем существующие ключи
-            dhKeyPair = loadDHKeysFromPEM();
-            Logger.info("Ключи DH успешно загружены из PEM-файлов.");
+            try {
+                dhKeyPair = loadDHKeysFromPEM();
+                Logger.info("Ключи DH клиента успешно загружены из PEM-файлов.");
+                
+                DHPublicKey pubKey = (DHPublicKey) dhKeyPair.getPublic();
+                if (!pubKey.getParams().getP().equals(clientDhP) || !pubKey.getParams().getG().equals(clientDhG)) {
+                    Logger.warn("Загруженные DH ключи клиента используют другие параметры P,G, чем текущие от сервера. Перегенерация.");
+                    throw new GeneralSecurityException("DH параметры загруженного ключа не совпадают с серверными.");
+                }
+            } catch (Exception e) {
+                Logger.warn("Не удалось загрузить или валидировать существующие DH ключи клиента (возможно, из-за смены P,G сервера): " + e.getMessage() + ". Будут сгенерированы новые.");
+                generateAndSaveNewDHKeys();
+            }
         } else {
-            // Генерируем новые ключи
-            DHParameterSpec dhParams = new DHParameterSpec(DH_P, DH_G);
-            KeyPairGenerator keyGen = KeyPairGenerator.getInstance("DH");
-            keyGen.initialize(dhParams);
-            dhKeyPair = keyGen.generateKeyPair();
-            
-            // Сохраняем ключи
-            saveDHKeysToPEM();
-            Logger.info("Сгенерированы новые DH ключи и сохранены в формате PEM.");
+            generateAndSaveNewDHKeys();
         }
+    }
+    
+    private void generateAndSaveNewDHKeys() throws Exception {
+        DHParameterSpec dhParams = new DHParameterSpec(clientDhP, clientDhG, 0);
+        KeyPairGenerator keyGen = KeyPairGenerator.getInstance("DH", "BC");
+        keyGen.initialize(dhParams);
+        dhKeyPair = keyGen.generateKeyPair();
+        
+        saveDHKeysToPEM();
+        Logger.info("Сгенерированы новые DH ключи клиента и сохранены в формате PEM.");
     }
     
     /**
@@ -127,10 +152,10 @@ public class KeyManager {
      */
     private void saveRSAKeysToPEM() throws Exception {
         // Сохраняем приватный ключ
-        savePEMKey(new File(USER_DATA_DIR, RSA_PRIVATE_KEY_FILE), "RSA PRIVATE KEY", rsaKeyPair.getPrivate().getEncoded());
+        savePEMKey(new File(USER_DATA_DIR, RSA_PRIVATE_KEY_FILE), "PRIVATE KEY", rsaKeyPair.getPrivate().getEncoded());
         
         // Сохраняем публичный ключ
-        savePEMKey(new File(USER_DATA_DIR, RSA_PUBLIC_KEY_FILE), "RSA PUBLIC KEY", rsaKeyPair.getPublic().getEncoded());
+        savePEMKey(new File(USER_DATA_DIR, RSA_PUBLIC_KEY_FILE), "PUBLIC KEY", rsaKeyPair.getPublic().getEncoded());
         
         Logger.info("RSA ключи сохранены в PEM-формате: " + 
                    Path.of(USER_DATA_DIR, RSA_PUBLIC_KEY_FILE) + ", " + 
@@ -142,10 +167,10 @@ public class KeyManager {
      */
     private void saveDHKeysToPEM() throws Exception {
         // Сохраняем приватный ключ
-        savePEMKey(new File(USER_DATA_DIR, DH_PRIVATE_KEY_FILE), "DH PRIVATE KEY", dhKeyPair.getPrivate().getEncoded());
+        savePEMKey(new File(USER_DATA_DIR, DH_PRIVATE_KEY_FILE), "PRIVATE KEY", dhKeyPair.getPrivate().getEncoded());
         
         // Сохраняем публичный ключ
-        savePEMKey(new File(USER_DATA_DIR, DH_PUBLIC_KEY_FILE), "DH PUBLIC KEY", dhKeyPair.getPublic().getEncoded());
+        savePEMKey(new File(USER_DATA_DIR, DH_PUBLIC_KEY_FILE), "PUBLIC KEY", dhKeyPair.getPublic().getEncoded());
         
         Logger.info("DH ключи сохранены в PEM-формате: " + 
                    Path.of(USER_DATA_DIR, DH_PUBLIC_KEY_FILE) + ", " + 
@@ -175,8 +200,23 @@ public class KeyManager {
      * Загружает DH ключи из PEM-файлов
      */
     private KeyPair loadDHKeysFromPEM() throws Exception {
-        PublicKey publicKey = loadPublicKeyFromPEM(new File(USER_DATA_DIR, DH_PUBLIC_KEY_FILE), "DH");
+        if (!dhParametersSet || clientDhP == null || clientDhG == null) {
+            throw new IllegalStateException("DH параметры (P, G) должны быть установлены от сервера перед загрузкой DH ключей клиента.");
+        }
         PrivateKey privateKey = loadPrivateKeyFromPEM(new File(USER_DATA_DIR, DH_PRIVATE_KEY_FILE), "DH");
+        PublicKey publicKey = loadPublicKeyFromPEM(new File(USER_DATA_DIR, DH_PUBLIC_KEY_FILE), "DH");
+
+        if (publicKey instanceof DHPublicKey) {
+            DHPublicKey dhPubKey = (DHPublicKey) publicKey;
+            DHParameterSpec params = dhPubKey.getParams();
+            if (!params.getP().equals(clientDhP) || !params.getG().equals(clientDhG)) {
+                 Logger.error("Параметры P,G загруженного DH публичного ключа клиента (" + params.getP().toString().substring(0,10) + "...," + params.getG() + ") " +
+                             "не совпадают с текущими параметрами от сервера (" + clientDhP.toString().substring(0,10) + "...," + clientDhG + ").");
+                throw new GeneralSecurityException("Параметры DH загруженного ключа клиента не совпадают с текущими параметрами от сервера.");
+            }
+        } else {
+             throw new GeneralSecurityException("Загруженный публичный ключ DH имеет неверный тип.");
+        }
         return new KeyPair(publicKey, privateKey);
     }
     
@@ -185,8 +225,19 @@ public class KeyManager {
      */
     private PublicKey loadPublicKeyFromPEM(File file, String algorithm) throws Exception {
         byte[] encoded = readPEMFile(file);
+
+        // Логирование для отладки
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < Math.min(encoded.length, 16); i++) {
+            sb.append(String.format("%02X ", encoded[i]));
+        }
+        Logger.info("loadPublicKeyFromPEM: Reading from file: " + file.getAbsolutePath());
+        Logger.info("loadPublicKeyFromPEM: Algorithm: " + algorithm);
+        Logger.info("loadPublicKeyFromPEM: Encoded key length: " + encoded.length);
+        Logger.info("loadPublicKeyFromPEM: First " + Math.min(encoded.length, 16) + " bytes of encoded key: " + sb.toString().trim());
+
         X509EncodedKeySpec keySpec = new X509EncodedKeySpec(encoded);
-        KeyFactory keyFactory = KeyFactory.getInstance(algorithm);
+        KeyFactory keyFactory = KeyFactory.getInstance(algorithm, BouncyCastleProvider.PROVIDER_NAME);
         return keyFactory.generatePublic(keySpec);
     }
     
@@ -196,7 +247,7 @@ public class KeyManager {
     private PrivateKey loadPrivateKeyFromPEM(File file, String algorithm) throws Exception {
         byte[] encoded = readPEMFile(file);
         PKCS8EncodedKeySpec keySpec = new PKCS8EncodedKeySpec(encoded);
-        KeyFactory keyFactory = KeyFactory.getInstance(algorithm);
+        KeyFactory keyFactory = KeyFactory.getInstance(algorithm, BouncyCastleProvider.PROVIDER_NAME);
         return keyFactory.generatePrivate(keySpec);
     }
     
@@ -222,34 +273,33 @@ public class KeyManager {
     }
     
     /**
-     * Устанавливает параметры аффинного шифра сервера
+     * Устанавливает публичный ключ DH сервера и вычисляет общий секрет
      */
-    public void setServerAffineParams(Map<String, Object> affineParams) {
-        this.serverAffineParams = affineParams;
-        Logger.info("KeyManager: Аффинные параметры сервера установлены: " + affineParams);
-    }
-    
-    /**
-     * Устанавливает публичный DH-ключ сервера и вычисляет общий секрет
-     */
-    public void setServerDHPublicKey(BigInteger dhPublicKey) throws Exception {
-        this.dhServerPublicKey = dhPublicKey;
-        
-        if (dhKeyPair == null || dhKeyPair.getPrivate() == null) {
-            Logger.error("KeyManager: DHKeyPair клиента не инициализирован перед установкой DH ключа сервера.");
-            throw new IllegalStateException("Клиентский DHKeyPair не инициализирован.");
+    public synchronized void setServerDHPublicKey(BigInteger serverDhY) throws Exception {
+        if (!dhParametersSet || clientDhP == null || clientDhG == null) {
+            throw new IllegalStateException("DH параметры клиента (P, G) должны быть установлены перед установкой публичного ключа DH сервера.");
+        }
+        if (dhKeyPair == null) {
+            Logger.warn("DH ключевая пара клиента не инициализирована при попытке установить ключ DH сервера. Попытка инициализации...");
+            initDHKeys();
+            if (dhKeyPair == null) {
+                 throw new IllegalStateException("DH ключевая пара клиента не может быть инициализирована. Проверьте установку P и G.");
+            }
         }
         
-        KeyFactory keyFactory = KeyFactory.getInstance("DH");
-        DHPublicKeySpec keySpec = new DHPublicKeySpec(dhPublicKey, DH_P, DH_G);
-        PublicKey serverPublicKeyObj = keyFactory.generatePublic(keySpec);
+        this.dhServerPublicKeyY = serverDhY;
+        Logger.info("Публичный ключ DH сервера установлен: Y_server=" + serverDhY.toString().substring(0, Math.min(10,serverDhY.toString().length())) + "...");
         
-        KeyAgreement keyAgreement = KeyAgreement.getInstance("DH");
+        KeyFactory keyFactory = KeyFactory.getInstance("DH", "BC");
+        DHPublicKeySpec dhPublicKeySpec = new DHPublicKeySpec(serverDhY, clientDhP, clientDhG);
+        PublicKey serverDHPublicKey = keyFactory.generatePublic(dhPublicKeySpec);
+        
+        KeyAgreement keyAgreement = KeyAgreement.getInstance("DH", "BC");
         keyAgreement.init(dhKeyPair.getPrivate());
-        keyAgreement.doPhase(serverPublicKeyObj, true);
+        keyAgreement.doPhase(serverDHPublicKey, true);
         
         this.dhSharedSecret = keyAgreement.generateSecret();
-        Logger.info("KeyManager: Вычислен общий DH-секрет с сервером. Длина: " + (dhSharedSecret != null ? dhSharedSecret.length : 0));
+        Logger.info("Общий секрет DH успешно сгенерирован. Длина: " + (dhSharedSecret != null ? dhSharedSecret.length * 8 : "null") + " бит.");
     }
     
     /**
@@ -282,12 +332,20 @@ public class KeyManager {
      * Возвращает Y-компоненту публичного DH-ключа клиента (BigInteger)
      */
     public BigInteger getClientDHPublicKeyY() {
-        if (dhKeyPair == null || !(dhKeyPair.getPublic() instanceof DHPublicKey)) {
-           Logger.error("KeyManager: DHKeyPair клиента не инициализирован или публичный ключ не является DHPublicKey.");
-           return null;
+        if (dhKeyPair == null) {
+            Logger.warn("Попытка получить Y клиента, но DH ключевая пара не инициализирована.");
+            if (dhParametersSet) {
+                try {
+                    initDHKeys();
+                } catch (Exception e) {
+                     Logger.error("Не удалось инициализировать DH ключи при попытке получить Y клиента: " + e.getMessage(), e);
+                     return null;
+                }
+            }
+            if (dhKeyPair == null) return null;
         }
-        DHPublicKey publicKey = (DHPublicKey) dhKeyPair.getPublic();
-        return publicKey.getY();
+        DHPublicKey dhPublicKey = (DHPublicKey) dhKeyPair.getPublic();
+        return dhPublicKey.getY();
     }
     
     /**
@@ -295,7 +353,7 @@ public class KeyManager {
      */
     public byte[] getDHSharedSecret() {
         if (dhSharedSecret == null) {
-            Logger.warn("Попытка получить DH общий секрет, но он еще не вычислен (равен null).");
+             Logger.warn("Попытка получить общий секрет DH, но он еще не сгенерирован.");
         }
         return dhSharedSecret;
     }
@@ -304,7 +362,7 @@ public class KeyManager {
      * Проверяет, доступен ли публичный ключ DH сервера.
      */
     public boolean isServerDHPublicKeyAvailable() {
-        return this.dhServerPublicKey != null;
+        return dhServerPublicKeyY != null;
     }
     
     /**
@@ -313,18 +371,102 @@ public class KeyManager {
     public PublicKey getServerRSAPublicKey() throws Exception {
         if (serverRsaPublicKeyN == null || serverRsaPublicKeyE == null) {
             Logger.warn("KeyManager: Публичный ключ RSA сервера не установлен (n или e is null).");
-            return null; // Или выбросить исключение, если это критично
+            return null;
         }
         
         RSAPublicKeySpec keySpec = new RSAPublicKeySpec(serverRsaPublicKeyN, serverRsaPublicKeyE);
         KeyFactory keyFactory = KeyFactory.getInstance("RSA");
         return keyFactory.generatePublic(keySpec);
     }
-    
+
+    public void setDHParameters(BigInteger p, BigInteger g) {
+        if (p == null || g == null) {
+            Logger.error("Попытка установить нулевые DH параметры P или G.");
+            throw new IllegalArgumentException("DH параметры P и G не могут быть null.");
+        }
+        this.clientDhP = p;
+        this.clientDhG = g;
+        this.dhParametersSet = true;
+        Logger.info("DH параметры клиента установлены: P=" + p.toString().substring(0, Math.min(10,p.toString().length())) + "..., G=" + g.toString());
+
+        try {
+            initDHKeys();
+        } catch (Exception e) {
+            Logger.error("Ошибка инициализации DH ключей клиента после установки параметров: " + e.getMessage(), e);
+            throw new RuntimeException("Не удалось инициализировать DH ключи клиента", e);
+        }
+    }
+
+    public boolean areDHParametersSet() {
+        return this.dhParametersSet;
+    }
+
     /**
-     * Возвращает параметры аффинного шифра сервера
+     * Возвращает PEM представление публичного ключа DH клиента.
+     * Необходимо для отправки на сервер или другому клиенту.
      */
-    public Map<String, Object> getServerAffineParams() {
-        return serverAffineParams;
+    public String getClientDHPublicKeyAsPEM() throws Exception {
+        if (dhKeyPair == null) {
+            initDHKeys();
+            if (dhKeyPair == null) {
+                 throw new IllegalStateException("Не удалось инициализировать/получить DH ключи клиента.");
+            }
+        }
+        File tempFile = File.createTempFile("temp_client_dh_pub", ".pem");
+        tempFile.deleteOnExit();
+        savePEMKey(tempFile, "PUBLIC KEY", dhKeyPair.getPublic().getEncoded());
+        
+        String pemString = new String(java.nio.file.Files.readAllBytes(tempFile.toPath()));
+        tempFile.delete();
+        return pemString;
+    }
+    
+    public BigInteger getClientDhP() {
+        return clientDhP;
+    }
+
+    public BigInteger getClientDhG() {
+        return clientDhG;
+    }
+
+    /**
+     * Возвращает DH KeyPair клиента.
+     * Может вернуть null, если ключи не инициализированы.
+     */
+    public KeyPair getDhKeyPair() {
+        // Попытка инициализировать, если еще не сделано и параметры есть
+        if (dhKeyPair == null && dhParametersSet) {
+            try {
+                initDHKeys();
+            } catch (Exception e) {
+                Logger.error("KeyManager: Не удалось инициализировать DH ключи при попытке получить KeyPair: " + e.getMessage(), e);
+                return null;
+            }
+        }
+        return dhKeyPair;
+    }
+
+    /**
+     * Возвращает объект приватного RSA ключа клиента.
+     * @return java.security.PrivateKey или null, если ключи не инициализированы.
+     */
+    public java.security.PrivateKey getRsaPrivateKeyObject() {
+        if (rsaKeyPair != null) {
+            return rsaKeyPair.getPrivate();
+        }
+        // Можно добавить попытку загрузки или генерации, если rsaKeyPair == null
+        // Logger.warn("KeyManager: Попытка получить объект приватного RSA ключа, но rsaKeyPair не инициализирован.");
+        return null;
+    }
+
+    /**
+     * Возвращает объект публичного RSA ключа клиента.
+     * @return java.security.PublicKey или null, если ключи не инициализированы.
+     */
+    public java.security.PublicKey getRsaPublicKeyObject() {
+        if (rsaKeyPair != null) {
+            return rsaKeyPair.getPublic();
+        }
+        return null;
     }
 } 
