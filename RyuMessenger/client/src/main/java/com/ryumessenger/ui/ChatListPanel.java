@@ -57,7 +57,7 @@ public class ChatListPanel extends JPanel implements ThemedComponent {
 
         newUserButton = new RoundedButton("+", 20, AppTheme.highlightBlue(), Color.WHITE);
         newUserButton.setToolTipText("Найти пользователя и начать новый чат");
-        newUserButton.addActionListener(e -> openUserSearchDialog());
+        newUserButton.addActionListener(_ -> openUserSearchDialog());
         newUserButton.setPreferredSize(new Dimension(40, 40));
 
         titleButtonPanel = new JPanel(new BorderLayout(0,5));
@@ -100,7 +100,7 @@ public class ChatListPanel extends JPanel implements ThemedComponent {
         
         // Инициализируем таймер для периодического обновления списка чатов
         // Обновляем каждые 5 секунд
-        refreshTimer = new Timer(5000, e -> refreshChatList());
+        refreshTimer = new Timer(5000, _ -> refreshChatList());
         refreshTimer.start();
     }
 
@@ -108,12 +108,11 @@ public class ChatListPanel extends JPanel implements ThemedComponent {
         JFrame topFrame = (JFrame) SwingUtilities.getWindowAncestor(this);
         UserSearchDialog userSearchDialog = new UserSearchDialog(
             topFrame, 
-            Main.getUserService(), 
+            Main.getUserService(),
             selectedUser -> {
                 if (selectedUser != null) {
                     System.out.println("Выбран пользователь для чата: " + selectedUser.toString());
                     
-                    // Показываем индикатор загрузки или текст о создании чата
                     if (chatPanel != null) {
                         chatPanel.showLoadingMessage("Создание чата...");
                     }
@@ -121,15 +120,12 @@ public class ChatListPanel extends JPanel implements ThemedComponent {
                     chatService.findOrCreateChatWithUser(selectedUser, newChat -> {
                         SwingUtilities.invokeLater(() -> {
                             if (newChat != null) {
-                                // Перезагружаем список чатов с сервера
                                 System.out.println("Чат успешно создан, обновляем список чатов");
                                 loadChats(() -> {
-                                    // После перезагрузки списка находим созданный чат и выбираем его
                                     selectChatById(newChat.getId());
                                 });
                             } else {
                                 JOptionPane.showMessageDialog(this, "Не удалось создать или найти чат с пользователем.", "Ошибка чата", JOptionPane.ERROR_MESSAGE);
-                                // Восстанавливаем интерфейс если была ошибка
                                 if (chatPanel != null) {
                                     chatPanel.hideLoadingMessage();
                                 }

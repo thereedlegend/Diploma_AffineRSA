@@ -52,6 +52,7 @@ public class MainFrame extends JFrame implements ThemedComponent {
         // Настраиваем разделитель
         splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, chatListPanel, chatPanel);
         splitPane.setDividerLocation(300);
+        splitPane.setResizeWeight(0.3);
         add(splitPane);
 
         // Создаем меню
@@ -79,22 +80,25 @@ public class MainFrame extends JFrame implements ThemedComponent {
         
         JMenu fileMenu = new JMenu("Файл");
         
-        JMenuItem settingsItem = new JMenuItem("Настройки");
-        settingsItem.addActionListener(e -> openSettings());
+        JMenuItem settingsMenuItem = new JMenuItem("Настройки");
+        JMenuItem logoutMenuItem = new JMenuItem("Выйти из аккаунта");
+        JMenuItem exitMenuItem = new JMenuItem("Выход");
         
-        JMenuItem exitItem = new JMenuItem("Выход");
-        exitItem.addActionListener(e -> performLogout());
+        fileMenu.add(settingsMenuItem);
+        fileMenu.add(logoutMenuItem);
+        fileMenu.addSeparator();
+        fileMenu.add(exitMenuItem);
+        settingsMenuItem.addActionListener(_ -> openSettings());
+        logoutMenuItem.addActionListener(_ -> performLogout());
+        exitMenuItem.addActionListener(_ -> System.exit(0));
         
-        fileMenu.add(settingsItem);
-        fileMenu.add(exitItem);
-        mb.add(fileMenu);
-
         JMenu helpMenu = new JMenu("Справка");
         
         JMenuItem aboutItem = new JMenuItem("О программе");
-        aboutItem.addActionListener(e -> showAboutDialog());
+        aboutItem.addActionListener(_ -> showAboutDialog());
         
         helpMenu.add(aboutItem);
+        mb.add(fileMenu);
         mb.add(helpMenu);
 
         return mb;
@@ -266,10 +270,10 @@ public class MainFrame extends JFrame implements ThemedComponent {
     private void startRefreshTimers() {
         if (chatListRefreshTimer != null) chatListRefreshTimer.stop();
         if (chatMessagesRefreshTimer != null) chatMessagesRefreshTimer.stop();
-        chatListRefreshTimer = new Timer(5000, e -> loadChatList());
+        chatListRefreshTimer = new Timer(5000, _ -> loadChatList());
         chatListRefreshTimer.setRepeats(true);
         chatListRefreshTimer.start();
-        chatMessagesRefreshTimer = new Timer(2000, e -> loadMessagesForCurrentChat());
+        chatMessagesRefreshTimer = new Timer(2000, _ -> loadMessagesForCurrentChat());
         chatMessagesRefreshTimer.setRepeats(true);
         chatMessagesRefreshTimer.start();
     }

@@ -20,10 +20,10 @@ import javax.swing.JCheckBox;
 
 import com.ryumessenger.Main;
 import com.ryumessenger.service.UserService;
+import com.ryumessenger.crypto.KeyManager;
+import com.ryumessenger.ui.theme.AppTheme;
 import com.ryumessenger.ui.theme.ThemeManager;
 import com.ryumessenger.ui.theme.ThemedComponent;
-import com.ryumessenger.ui.theme.AppTheme;
-import com.ryumessenger.crypto.KeyManager;
 
 public class LoginFrame extends JFrame implements ThemedComponent {
 
@@ -41,8 +41,13 @@ public class LoginFrame extends JFrame implements ThemedComponent {
     private final JPanel buttonPanel;
     private final JPanel statusPanel;
     private static final int BUTTON_CORNER_RADIUS = 15;
+    private KeyManager keyManager;
 
     public LoginFrame() {
+        this(false);
+    }
+
+    public LoginFrame(boolean showCryptoLog) {
         setTitle("Ryu Messenger - Вход");
         setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
         setSize(450, 380);
@@ -51,6 +56,7 @@ public class LoginFrame extends JFrame implements ThemedComponent {
 
         themeManager = ThemeManager.getInstance();
         userService = Main.getUserService();
+        keyManager = Main.getLegacyKeyManager();
 
         usernameField = new RoundedTextField(20);
         passwordField = new RoundedPasswordField(20);
@@ -64,7 +70,7 @@ public class LoginFrame extends JFrame implements ThemedComponent {
         passwordLabelText = new JLabel("Пароль:");
         
         showCryptoLogCheckbox = new JCheckBox("Показывать процесс шифрования и обмена данными");
-        showCryptoLogCheckbox.setSelected(false);
+        showCryptoLogCheckbox.setSelected(showCryptoLog);
         showCryptoLogCheckbox.setFont(initialTheme.labelFont());
         showCryptoLogCheckbox.setForeground(initialTheme.text());
         showCryptoLogCheckbox.setBackground(initialTheme.background());
@@ -128,8 +134,8 @@ public class LoginFrame extends JFrame implements ThemedComponent {
         southPanel.setOpaque(false);
         add(southPanel, BorderLayout.SOUTH);
 
-        loginButton.addActionListener(e -> login());
-        registerButton.addActionListener(e -> openRegisterFrame());
+        loginButton.addActionListener(_ -> performLogin());
+        registerButton.addActionListener(_ -> openRegisterFrame());
 
         getRootPane().setDefaultButton(loginButton);
         themeManager.registerThemedComponent(this);
@@ -145,21 +151,16 @@ public class LoginFrame extends JFrame implements ThemedComponent {
     }
 
     public void checkServerKeyStatusAndUpdateUI() {
-        boolean keyFetched = Main.isServerPublicKeyFetched();
-        KeyManager keyManager = Main.getKeyManager();
-        boolean keyActuallySet = keyManager != null && keyManager.getServerRsaPublicKey() != null;
+        keyManager = Main.getLegacyKeyManager();
+        boolean serverKeyReady = false;
+        if (keyManager != null && keyManager.getServerRsaPublicKey() != null) {
+            serverKeyReady = true;
+        }
 
-        if (keyFetched && keyActuallySet) {
+        if (serverKeyReady) {
             statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightGreen()) + "'>Ключ сервера получен. Готово к входу.</font></html>");
             loginButton.setEnabled(true);
             registerButton.setEnabled(true);
-        } else if (keyFetched && !keyActuallySet) {
-            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка: Неверный формат ключа сервера. Вход невозможен.</font></html>");
-            loginButton.setEnabled(false);
-            registerButton.setEnabled(false);
-            JOptionPane.showMessageDialog(this, 
-                    "Получен недействительный ключ безопасности от сервера. Пожалуйста, свяжитесь с администратором.", 
-                    "Ошибка ключа сервера", JOptionPane.ERROR_MESSAGE);
         } else {
             statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка: Ключ сервера не получен. Вход невозможен.</font></html>");
             loginButton.setEnabled(false);
@@ -171,53 +172,45 @@ public class LoginFrame extends JFrame implements ThemedComponent {
         }
     }
 
-    private void login() {
-        KeyManager keyManager = Main.getKeyManager();
-        if (!Main.isServerPublicKeyFetched() || keyManager == null || keyManager.getServerRsaPublicKey() == null) {
-            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка: Ключ сервера не доступен. Вход невозможен.</font></html>");
-            JOptionPane.showMessageDialog(this, 
-                    "Ключ безопасности сервера недоступен. Попробуйте перезапустить приложение.", 
-                    "Ошибка безопасности", JOptionPane.ERROR_MESSAGE);
-            loginButton.setEnabled(false);
-            registerButton.setEnabled(false);
-            return;
-        }
-
+    private void performLogin() {
         String username = usernameField.getText();
         String password = new String(passwordField.getPassword());
 
         if (username.isEmpty() || password.isEmpty()) {
-            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) +"'>Пожалуйста, заполните все поля</font></html>");
+            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Имя пользователя и пароль не могут быть пустыми.</font></html>");
             return;
         }
 
-        loginButton.setEnabled(false);
-        registerButton.setEnabled(false);
-        statusLabel.setText("Выполняется вход...");
-        statusLabel.setForeground(themeManager.getCurrentTheme().textSecondary());
-        
-        // Создаем журнал шифрования, если галочка выбрана
-        if (showCryptoLogCheckbox.isSelected()) {
-            CryptoLogWindow.getInstance().setVisible(true);
+        keyManager = Main.getLegacyKeyManager();
+        if (!Main.isServerPublicKeyFetched() || keyManager == null || keyManager.getServerRsaPublicKey() == null) {
+            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка: Ключ сервера не доступен. Вход невозможен.</font></html>");
+            return;
         }
+
+        setButtonsEnabled(false);
+        statusLabel.setText("Выполняется вход...");
 
         userService.login(username, password, success -> {
             SwingUtilities.invokeLater(() -> {
                 if (success) {
-                    dispose();
-                    // Передаем состояние чекбокса в MainFrame
-                    new MainFrame(showCryptoLogCheckbox.isSelected()).setVisible(true);
+                    statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightGreen()) + "'>Вход успешен! Открываем мессенджер...</font></html>");
+                    if (showCryptoLogCheckbox.isSelected()) {
+                        CryptoLogWindow.log("Вход успешен для пользователя: " + username);
+                    }
+                    openMainInterface();
                 } else {
-                    statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка входа. Неверный логин или пароль, или ошибка сервера.</font></html>");
-                    loginButton.setEnabled(true);
-                    registerButton.setEnabled(true);
+                    String errorMessage = "Неверные учетные данные или ошибка сервера.";
+                    statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка: " + errorMessage + "</font></html>");
+                    if (showCryptoLogCheckbox.isSelected()) {
+                        CryptoLogWindow.log("Ошибка входа: " + errorMessage);
+                    }
+                    setButtonsEnabled(true);
                 }
             });
         });
     }
 
     private void openRegisterFrame() {
-        KeyManager keyManager = Main.getKeyManager();
         if (!Main.isServerPublicKeyFetched() || keyManager == null || keyManager.getServerRsaPublicKey() == null) {
              statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка: Ключ сервера не доступен. Регистрация невозможна.</font></html>");
              JOptionPane.showMessageDialog(this, 
@@ -226,7 +219,6 @@ public class LoginFrame extends JFrame implements ThemedComponent {
             return;
         }
         
-        // Создаем журнал шифрования, если галочка выбрана
         if (showCryptoLogCheckbox.isSelected()) {
             CryptoLogWindow.getInstance().setVisible(true);
         }
@@ -303,5 +295,15 @@ public class LoginFrame extends JFrame implements ThemedComponent {
             statusLabel.setForeground(themeManager.getCurrentTheme().text());
         }
         SwingUtilities.updateComponentTreeUI(this);
+    }
+
+    private void setButtonsEnabled(boolean enabled) {
+        loginButton.setEnabled(enabled);
+        registerButton.setEnabled(enabled);
+    }
+
+    private void openMainInterface() {
+        dispose();
+        new MainFrame(showCryptoLogCheckbox.isSelected()).setVisible(true);
     }
 } 

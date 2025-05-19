@@ -24,7 +24,6 @@ import com.ryumessenger.service.UserService;
 import com.ryumessenger.ui.theme.AppTheme;
 import com.ryumessenger.ui.theme.ThemeManager;
 import com.ryumessenger.ui.theme.ThemedComponent;
-import com.ryumessenger.crypto.KeyManager;
 
 public class SettingsDialog extends JDialog implements ThemedComponent {
 
@@ -152,7 +151,7 @@ public class SettingsDialog extends JDialog implements ThemedComponent {
         fieldsPanel.add(themeComboBox, gbc);
         gbc.weightx = 0;
 
-        themeComboBox.addActionListener(e -> {
+        themeComboBox.addActionListener(_ -> {
             String selectedThemeName = (String) themeComboBox.getSelectedItem();
             AppTheme currentAppTheme = themeManager.getCurrentTheme();
             AppTheme.ThemeType targetType = "Темная".equals(selectedThemeName) ? AppTheme.ThemeType.DARK : AppTheme.ThemeType.LIGHT;
@@ -166,14 +165,20 @@ public class SettingsDialog extends JDialog implements ThemedComponent {
 
         buttonPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
         saveButton = new RoundedButton("Сохранить изменения", BUTTON_CORNER_RADIUS, AppTheme.highlightBlue(), Color.WHITE);
-        saveButton.addActionListener(e -> saveChanges());
+        saveButton.addActionListener(_ -> saveChanges());
         buttonPanel.add(saveButton);
         add(buttonPanel, BorderLayout.SOUTH);
     }
 
     private void checkServerKeyStatusAndUpdateUI() {
-        KeyManager keyManager = Main.getKeyManager();
-        boolean keyAvailable = Main.isServerPublicKeyFetched() && keyManager != null && keyManager.getServerRsaPublicKey() != null;
+        com.ryumessenger.security.KeyManager keyManager = Main.getKeyManager();
+        boolean keyAvailable = false;
+        try {
+            keyAvailable = Main.isServerPublicKeyFetched() && keyManager != null && keyManager.getServerRSAPublicKey() != null;
+        } catch (Exception e) {
+            CryptoLogWindow.log("Ошибка при получении RSA ключа сервера в checkServerKeyStatusAndUpdateUI (SettingsDialog): " + e.getMessage());
+            keyAvailable = false; // Считаем ключ недоступным при ошибке
+        }
         
         if (!keyAvailable) {
             passwordStatusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Смена пароля невозможна: ключ сервера недоступен.</font></html>");
@@ -218,8 +223,16 @@ public class SettingsDialog extends JDialog implements ThemedComponent {
         }
 
         if (passwordChangeAttempted) {
-            KeyManager keyManager = Main.getKeyManager();
-            if (!Main.isServerPublicKeyFetched() || keyManager == null || keyManager.getServerRsaPublicKey() == null) {
+            com.ryumessenger.security.KeyManager keyManager = Main.getKeyManager();
+            boolean serverKeyValid = false;
+            try {
+                 serverKeyValid = Main.isServerPublicKeyFetched() && keyManager != null && keyManager.getServerRSAPublicKey() != null;
+            } catch (Exception e) {
+                CryptoLogWindow.log("Ошибка при получении RSA ключа сервера в saveChanges (SettingsDialog): " + e.getMessage());
+                serverKeyValid = false;
+            }
+
+            if (!serverKeyValid) {
                 passwordStatusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Смена пароля невозможна: ключ сервера недоступен.</font></html>");
                 showErrorMessage("Невозможно сменить пароль: ключ безопасности сервера недоступен. Попробуйте перезапустить приложение.");
                 return;

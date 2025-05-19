@@ -116,39 +116,56 @@ def register():
 
 @api_bp.route('/login', methods=['POST'])
 def login():
-    data = request.get_json()
-    if not data:
-        return jsonify({"error": "Invalid JSON"}), 400
+    current_app.logger.debug("Login attempt received")
+    
+    try:
+        data = request.get_json()
+        if not data:
+            current_app.logger.warning("Login attempt failed: Invalid JSON")
+            return jsonify({"error": "Invalid JSON"}), 400
 
-    username = data.get('username')
-    encrypted_login_payload = data.get('encrypted_login_payload')
+        username = data.get('username')
+        encrypted_login_payload = data.get('encrypted_login_payload')
 
-    if not all([username, encrypted_login_payload]):
-        return jsonify({"error": "Missing data for login"}), 400
+        current_app.logger.debug(f"Login attempt for username: {username}")
+        current_app.logger.debug(f"Encrypted payload length: {len(encrypted_login_payload) if encrypted_login_payload else 0}")
 
-    user_service = current_app.user_service
-    user_data, message = user_service.authenticate_user(username, encrypted_login_payload)
+        if not all([username, encrypted_login_payload]):
+            missing_fields = []
+            if not username:
+                missing_fields.append('username')
+            if not encrypted_login_payload:
+                missing_fields.append('encrypted_login_payload')
+            current_app.logger.warning(f"Login attempt failed: Missing required fields: {', '.join(missing_fields)}")
+            return jsonify({"error": f"Missing required fields: {', '.join(missing_fields)}"}), 400
 
-    if user_data:
-        # Генерация JWT токена
-        try:
-            token_payload = {
-                'user_id': user_data['id'],
-                'username': user_data['username'],
-                'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24) # Токен действителен 24 часа
-            }
-            token = jwt.encode(
-                token_payload, 
-                current_app.config['SECRET_KEY'], 
-                algorithm='HS256'
-            )
-            current_app.logger.info(f"JWT token generated for user_id: {user_data['id']}")
-            return jsonify({"message": message, "user": user_data, "token": token}), 200 # Возвращаем токен
-        except Exception as e:
-            current_app.logger.error(f"Error generating JWT token: {e}", exc_info=True)
-            return jsonify({"error": "Failed to generate authentication token."}), 500
-    else:
-        return jsonify({"error": message}), 401
+        user_service = current_app.user_service
+        user_data, message = user_service.authenticate_user(username, encrypted_login_payload)
+
+        if user_data:
+            # Генерация JWT токена
+            try:
+                token_payload = {
+                    'user_id': user_data['id'],
+                    'username': user_data['username'],
+                    'exp': datetime.datetime.utcnow() + datetime.timedelta(hours=24) # Токен действителен 24 часа
+                }
+                token = jwt.encode(
+                    token_payload, 
+                    current_app.config['SECRET_KEY'], 
+                    algorithm='HS256'
+                )
+                current_app.logger.info(f"Login successful for user_id: {user_data['id']}")
+                return jsonify({"message": message, "user": user_data, "token": token}), 200
+            except Exception as e:
+                current_app.logger.error(f"Error generating JWT token: {e}", exc_info=True)
+                return jsonify({"error": "Failed to generate authentication token."}), 500
+        else:
+            current_app.logger.warning(f"Login failed for username {username}: {message}")
+            return jsonify({"error": message}), 401
+    except Exception as e:
+        current_app.logger.error(f"Unexpected error during login: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error during login"}), 500
 
 @api_bp.route('/users/search', methods=['POST'])
 def search_user():

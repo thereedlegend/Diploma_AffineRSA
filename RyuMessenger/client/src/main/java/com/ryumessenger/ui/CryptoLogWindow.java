@@ -90,11 +90,11 @@ public class CryptoLogWindow extends JFrame implements ThemedComponent {
         
         // Панель с кнопками
         JPanel buttonPanel = new JPanel();
-        JButton clearButton = new JButton("Очистить журнал");
-        clearButton.addActionListener(e -> clear());
+        JButton clearButton = new JButton("Очистить");
+        clearButton.addActionListener(_ -> clear());
         
-        JButton copyButton = new JButton("Копировать всё");
-        copyButton.addActionListener(e -> {
+        JButton copyButton = new JButton("Копировать");
+        copyButton.addActionListener(_ -> {
             logArea.selectAll();
             logArea.copy();
             logArea.setSelectionStart(logArea.getSelectionEnd());

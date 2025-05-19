@@ -12,7 +12,6 @@ import java.awt.event.WindowEvent;
 import javax.swing.BorderFactory;
 import javax.swing.JFrame;
 import javax.swing.JLabel;
-import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.SwingConstants;
 import javax.swing.SwingUtilities;
@@ -24,7 +23,11 @@ import com.ryumessenger.service.UserService;
 import com.ryumessenger.ui.theme.ThemeManager;
 import com.ryumessenger.ui.theme.ThemedComponent;
 import com.ryumessenger.ui.theme.AppTheme;
-import com.ryumessenger.crypto.KeyManager;
+import com.ryumessenger.security.AuthPayloadFormatter;
+import com.ryumessenger.network.ApiClient.ApiResponse;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import org.json.JSONObject;
 
 public class RegisterFrame extends JFrame implements ThemedComponent {
 
@@ -36,7 +39,7 @@ public class RegisterFrame extends JFrame implements ThemedComponent {
     private RoundedButton registerButton;
     private RoundedButton backToLoginButton;
     private JLabel statusLabel;
-    private final UserService userService;
+    
     private final ThemeManager themeManager;
     private final boolean showCryptoLog;
     
@@ -57,7 +60,6 @@ public class RegisterFrame extends JFrame implements ThemedComponent {
     }
 
     public RegisterFrame(UserService userService, boolean showCryptoLog) {
-        this.userService = userService;
         this.showCryptoLog = showCryptoLog;
         
         setTitle("Ryu Messenger - Регистрация");
@@ -194,7 +196,7 @@ public class RegisterFrame extends JFrame implements ThemedComponent {
         mainPanel.add(buttonPanel, gbc);
 
         registerButton.addActionListener(this::performRegistration);
-        backToLoginButton.addActionListener(e -> openLoginFrame());
+        backToLoginButton.addActionListener(_ -> openLoginFrame());
         
         confirmPasswordField.addActionListener(this::performRegistration);
         passwordField.addActionListener(this::performRegistration);
@@ -224,8 +226,16 @@ public class RegisterFrame extends JFrame implements ThemedComponent {
 
     private void checkServerKeyStatusAndUpdateUI() {
         boolean keyFetched = Main.isServerPublicKeyFetched();
-        KeyManager keyManager = Main.getKeyManager();
-        boolean keyActuallySet = keyManager != null && keyManager.getServerRsaPublicKey() != null;
+        com.ryumessenger.security.KeyManager keyManager = Main.getKeyManager();
+        boolean keyActuallySet = false;
+        try {
+            keyActuallySet = keyManager != null && keyManager.getServerRSAPublicKey() != null;
+        } catch (Exception e) {
+            CryptoLogWindow.log("Ошибка при получении RSA ключа сервера в checkServerKeyStatusAndUpdateUI: " + e.getMessage());
+            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка проверки ключа сервера. Регистрация невозможна.</font></html>");
+            setButtonsEnabled(false);
+            return;
+        }
 
         if (keyFetched && keyActuallySet) {
             statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightGreen()) + "'>Ключ сервера получен. Готово к регистрации.</font></html>");
@@ -239,42 +249,17 @@ public class RegisterFrame extends JFrame implements ThemedComponent {
             setButtonsEnabled(false);
             
             if (showCryptoLog) {
-                CryptoLogWindow.log("Статус: Ошибка: Неверный формат ключа сервера. Регистрация невозможна.");
-            }
-            
-            JOptionPane.showMessageDialog(this,
-                    "Получен недействительный ключ безопасности от сервера. Пожалуйста, свяжитесь с администратором.",
-                    "Ошибка ключа сервера", JOptionPane.ERROR_MESSAGE);
-        } else {
-            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка: Ключ сервера не получен. Регистрация невозможна.</font></html>");
-            setButtonsEnabled(false);
-            
-            if (showCryptoLog) {
                 CryptoLogWindow.log("Статус: Ошибка: Ключ сервера не получен. Регистрация невозможна.");
             }
-            
-            JOptionPane.showMessageDialog(this,
-                "Не удалось получить ключ безопасности сервера. Пожалуйста, проверьте соединение\n" +
-                "с сервером и попробуйте перезапустить приложение.",
-                "Ошибка безопасности", JOptionPane.ERROR_MESSAGE);
         }
     }
 
     private void performRegistration(ActionEvent event) {
-        KeyManager keyManager = Main.getKeyManager();
-        if (!Main.isServerPublicKeyFetched() || keyManager == null || keyManager.getServerRsaPublicKey() == null) {
-            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка: Ключ сервера не доступен. Регистрация невозможна.</font></html>");
-            
-            if (showCryptoLog) {
-                CryptoLogWindow.log("Ошибка: Ключ сервера не доступен. Регистрация невозможна.");
-            }
-            
-            JOptionPane.showMessageDialog(this,
-                    "Ключ безопасности сервера недоступен. Попробуйте перезапустить приложение.",
-                    "Ошибка безопасности", JOptionPane.ERROR_MESSAGE);
-            setButtonsEnabled(false);
-            return;
+        if (showCryptoLog) {
+            CryptoLogWindow.log("Начало процесса регистрации...");
         }
+        statusLabel.setText("Выполняется регистрация...");
+        setButtonsEnabled(false);
 
         String username = usernameField.getText().trim();
         String tag = tagField.getText().trim();
@@ -282,77 +267,95 @@ public class RegisterFrame extends JFrame implements ThemedComponent {
         String password = new String(passwordField.getPassword());
         String confirmPassword = new String(confirmPasswordField.getPassword());
 
-        boolean isUsernameValid = !username.isEmpty() && username.matches("^[a-zA-Z0-9_]{3,20}$");
-        boolean isTagValid = !tag.isEmpty() && tag.matches("^[a-zA-Z0-9_]{3,20}$");
-        boolean isDisplayNameValid = !displayName.isEmpty() && displayName.length() <= 50;
-        boolean isPasswordValid = password.length() >= 6;
-        boolean passwordsMatch = password.equals(confirmPassword);
-
-        styleField(usernameField, isUsernameValid, "Логин должен содержать 3-20 англ. букв, цифр или _, и быть уникальным.", themeManager.getCurrentTheme());
-        styleField(tagField, isTagValid, "Тег должен содержать 3-20 англ. букв, цифр или _, и быть уникальным.", themeManager.getCurrentTheme());
-        styleField(displayNameField, isDisplayNameValid, "Имя не должно быть пустым (до 50 симв.).", themeManager.getCurrentTheme());
-        styleField(passwordField, isPasswordValid, "Пароль должен быть не менее 6 символов.", themeManager.getCurrentTheme());
-        styleField(confirmPasswordField, passwordsMatch, "Пароли не совпадают.", themeManager.getCurrentTheme());
-        
-        if (!isUsernameValid || !isPasswordValid || !isTagValid || !isDisplayNameValid || !passwordsMatch) {
-            String errorText = "Исправьте ошибки в полях: ";
-            if (!isUsernameValid) errorText += "Логин. ";
-            else if (!isTagValid) errorText += "Тег. ";
-            else if (!isDisplayNameValid) errorText += "Имя. ";
-            else if (!isPasswordValid) errorText += "Пароль. ";
-            else if (!passwordsMatch) errorText += "Пароли не совпадают. ";
-            
-            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>" + errorText + "</font></html>");
-            
-            if (showCryptoLog) {
-                CryptoLogWindow.log("Ошибка валидации: " + errorText);
-            }
-            
+        if (username.isEmpty() || tag.isEmpty() || displayName.isEmpty() || password.isEmpty()) {
+            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Все поля должны быть заполнены.</font></html>");
+            setButtonsEnabled(true);
             return;
         }
 
-        statusLabel.setText("Выполняется регистрация...");
-        statusLabel.setForeground(themeManager.getCurrentTheme().textSecondary());
-        setButtonsEnabled(false);
+        if (!password.equals(confirmPassword)) {
+            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Пароли не совпадают.</font></html>");
+            setButtonsEnabled(true);
+            return;
+        }
         
-        if (showCryptoLog) {
-            CryptoLogWindow.log("Выполняется регистрация пользователя: " + username + " (" + displayName + ")");
+        // Получаем необходимые сервисы из Main
+        AuthPayloadFormatter authPayloadFormatter = Main.getAuthPayloadFormatter();
+        ApiClient apiClient = Main.getApiClient();
+        com.ryumessenger.security.KeyManager securityKeyManager = Main.getKeyManager();
+
+        if (authPayloadFormatter == null || apiClient == null || securityKeyManager == null) {
+            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка: Клиент не инициализирован. Попробуйте перезапустить.</font></html>");
+            setButtonsEnabled(true);
+            CryptoLogWindow.log("Ошибка: authPayloadFormatter, apiClient или securityKeyManager не инициализированы.");
+            return;
         }
 
-        userService.register(username, tag, displayName, password, (ApiClient.ApiResponse apiResponse) -> {
+        try {
+            if (securityKeyManager.getServerRSAPublicKey() == null) {
+                statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка: Ключ сервера недоступен. Попробуйте позже.</font></html>");
+                setButtonsEnabled(true);
+                CryptoLogWindow.log("Ошибка: RSA ключ сервера не доступен в securityKeyManager.");
+                return;
+            }
+             if (securityKeyManager.getClientDHPublicKeyY() == null) {
+                statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка: DH ключ клиента недоступен. Попробуйте перезапустить.</font></html>");
+                setButtonsEnabled(true);
+                CryptoLogWindow.log("Ошибка: DH ключ клиента не доступен в securityKeyManager.");
+                return;
+            }
+        } catch (Exception e) {
+            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка проверки ключей: " + e.getMessage() +"</font></html>");
+            setButtonsEnabled(true);
+            CryptoLogWindow.log("Критическая ошибка при проверке ключей перед регистрацией: " + e.getMessage());
+            return;
+        }
+
+        Map<String, Object> registrationData;
+        try {
+            registrationData = authPayloadFormatter.createRegistrationRequest(username, password, tag, displayName);
+            if (registrationData == null) {
+                 throw new RuntimeException("createRegistrationRequest вернул null, возможно отсутствуют DH или RSA ключи клиента.");
+            }
+        } catch (Exception e) {
+            statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка подготовки данных: " + e.getMessage() +"</font></html>");
+            setButtonsEnabled(true);
+            CryptoLogWindow.log("Ошибка при создании registrationData: " + e.getMessage());
+            return;
+        }
+        
+        if (showCryptoLog) {
+             CryptoLogWindow.log("Данные для регистрации сформированы: " + new JSONObject(registrationData).toString().substring(0, Math.min(100, new JSONObject(registrationData).toString().length())) + "...");
+             CryptoLogWindow.log("Отправка запроса на /auth/register...");
+        }
+
+        CompletableFuture<ApiResponse> future = apiClient.register(registrationData);
+
+        future.thenAccept(response -> {
             SwingUtilities.invokeLater(() -> {
-                if (apiResponse.isSuccess()) {
-                    statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightGreen()) + "'>Регистрация успешна! Теперь вы можете войти.</font></html>");
-                    
-                    if (showCryptoLog) {
-                        CryptoLogWindow.log("Регистрация успешна! Переход к экрану входа через 2.5 секунды...");
-                    }
-                    
-                    Timer timer = new Timer(2500, e -> openLoginFrame());
+                if (response.isSuccess()) {
+                    statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightGreen()) + "'>Регистрация успешна! Переход на страницу входа...</font></html>");
+                    CryptoLogWindow.log("Регистрация успешна для " + username + ". Ответ: " + response.getBody());
+                    Timer timer = new Timer(2000, _ -> openLoginFrame());
                     timer.setRepeats(false);
                     timer.start();
                 } else {
-                    String errorMessage = "Ошибка регистрации.";
-                    if (apiResponse.getJson() != null && apiResponse.getJson().has("message")) {
-                        errorMessage = apiResponse.getJson().getString("message");
-                    } else if (apiResponse.getStatusCode() == 400) {
-                        errorMessage = "Неверные данные или такой пользователь/тег уже существует.";
-                    } else if (apiResponse.getStatusCode() == 0 && apiResponse.getBody() != null && apiResponse.getBody().contains("Failed to encrypt")) {
-                         errorMessage = "Ошибка шифрования пароля. Проверьте ключ сервера.";
-                    } else if (apiResponse.getBody() != null && !apiResponse.getBody().isEmpty()) {
-                        errorMessage = "Ошибка сервера: " + apiResponse.getBody().substring(0, Math.min(apiResponse.getBody().length(), 100));
-                    } else if (apiResponse.getStatusCode() != 0) {
-                         errorMessage = "Ошибка сервера (код: " + apiResponse.getStatusCode() + ")";
-                    }
-                    statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>" + errorMessage + "</font></html>");
-                    
-                    if (showCryptoLog) {
-                        CryptoLogWindow.log("Ошибка регистрации: " + errorMessage);
-                    }
-                    
+                    String errorMsg = response.getErrorMessage() != null ? response.getErrorMessage() : "Неизвестная ошибка.";
+                    statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка регистрации: " + errorMsg + "</font></html>");
+                    CryptoLogWindow.log("Ошибка регистрации для " + username + ". Статус: " + response.getStatusCode() + ", Ошибка: " + errorMsg);
                     setButtonsEnabled(true);
                 }
             });
+        }).exceptionally(ex -> {
+            SwingUtilities.invokeLater(() -> {
+                statusLabel.setText("<html><font color='" + AppTheme.toHex(AppTheme.highlightRed()) + "'>Ошибка сети: " + ex.getMessage() + "</font></html>");
+                CryptoLogWindow.log("Сетевая ошибка или исключение при регистрации: " + ex.toString());
+                 if (ex.getCause() != null) {
+                    CryptoLogWindow.log("Причина: " + ex.getCause().toString());
+                }
+                setButtonsEnabled(true);
+            });
+            return null;
         });
     }
     
@@ -361,14 +364,16 @@ public class RegisterFrame extends JFrame implements ThemedComponent {
         backToLoginButton.setEnabled(enabled);
     }
 
-    private void openLoginFrame() {
+    public void openLoginFrame() {
         if (showCryptoLog) {
             CryptoLogWindow.log("Переход к экрану входа");
         }
         
-        LoginFrame loginFrame = new LoginFrame();
-        loginFrame.setVisible(true);
-        dispose(); 
+        SwingUtilities.invokeLater(() -> {
+            LoginFrame loginFrame = new LoginFrame(showCryptoLog);
+            loginFrame.setVisible(true);
+            this.dispose();
+        });
     }
     
     // Метод для доступа к значению showCryptoLog

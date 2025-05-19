@@ -1,82 +1,112 @@
 import random
-from .crypto_utils import gcd, mod_inverse, get_char_map_and_modulus, get_inv_char_map, SUPPORTED_CHARS_RU, SUPPORTED_CHARS_EN
+from .crypto_utils import gcd, mod_inverse
 
 class AffineCipher:
-    def __init__(self, lang='ru'):
-        self.lang = lang
-        self.char_to_int, self.m = get_char_map_and_modulus(lang)
-        self.int_to_char = get_inv_char_map(lang)
-        self.key_a = None
-        self.key_b = None
+    def __init__(self):
+        # ASCII алфавит (32-126) - все печатные символы
+        self.alphabet = ''.join(chr(i) for i in range(32, 127))
+        self.m = len(self.alphabet)  # размер алфавита
+        self.a = 1  # множитель
+        self.b = 0  # сдвиг
 
-    def generate_keys(self):
-        """Генерирует ключи a и b для аффинного шифра."""
-        # key_a должно быть взаимно простым с m
-        self.key_a = random.choice([i for i in range(1, self.m) if gcd(i, self.m) == 1])
-        self.key_b = random.randint(0, self.m - 1)
-        return self.key_a, self.key_b
+    def set_keys(self, a: int, b: int):
+        """Устанавливает ключи шифрования."""
+        if not self._is_valid_key(a):
+            raise ValueError(f"Invalid key 'a': {a}. Must be coprime with {self.m}")
+        self.a = a
+        self.b = b % self.m
 
-    def set_keys(self, a, b):
-        if gcd(a, self.m) != 1:
-            raise ValueError(f"Ключ 'a' ({a}) должен быть взаимно простым с модулем {self.m} для языка {self.lang}")
-        self.key_a = a
-        self.key_b = b
+    def _is_valid_key(self, a: int) -> bool:
+        """Проверяет, является ли ключ 'a' взаимно простым с размером алфавита."""
+        return self._gcd(a, self.m) == 1
 
-    def encrypt(self, plaintext):
-        if self.key_a is None or self.key_b is None:
-            raise ValueError("Ключи не установлены или не сгенерированы.")
+    def _gcd(self, a: int, b: int) -> int:
+        """Вычисляет наибольший общий делитель."""
+        while b:
+            a, b = b, a % b
+        return a
+
+    def _mod_inverse(self, a: int) -> int:
+        """Вычисляет обратный элемент по модулю."""
+        for x in range(1, self.m):
+            if (a * x) % self.m == 1:
+                return x
+        raise ValueError(f"No modular inverse exists for {a} modulo {self.m}")
+
+    def generate_keys(self) -> tuple[int, int]:
+        """Генерирует пару ключей (a, b) для аффинного шифра."""
+        # Генерируем a, взаимно простое с размером алфавита
+        while True:
+            a = random.randint(2, self.m - 1)
+            if self._is_valid_key(a):
+                break
         
-        ciphertext = []
-        for char in plaintext:
-            if char in self.char_to_int:
-                char_code = self.char_to_int[char]
-                encrypted_code = (self.key_a * char_code + self.key_b) % self.m
-                ciphertext.append(self.int_to_char[encrypted_code])
+        # Генерируем случайное b
+        b = random.randint(0, self.m - 1)
+        
+        return a, b
+
+    def encrypt(self, text: str) -> str:
+        """Шифрует текст."""
+        if not text:
+            return text
+            
+        result = []
+        for char in text:
+            if char in self.alphabet:
+                # Находим индекс символа в алфавите
+                x = self.alphabet.index(char)
+                # Применяем формулу шифрования: (ax + b) mod m
+                y = (self.a * x + self.b) % self.m
+                # Получаем зашифрованный символ
+                result.append(self.alphabet[y])
             else:
-                # Если символ не из алфавита, оставляем его как есть (или можно выбросить ошибку)
-                # В ТЗ указано два языка, так что символы должны быть в одном из них
-                # Однако, смешанный текст или спецсимволы потребуют более сложной обработки
-                # или расширенного алфавита SUPPORTED_CHARS
-                ciphertext.append(char) 
-        return "".join(ciphertext)
+                # Если символ не в алфавите, оставляем как есть
+                result.append(char)
+        return ''.join(result)
 
-    def decrypt(self, ciphertext):
-        if self.key_a is None or self.key_b is None:
-            raise ValueError("Ключи не установлены или не сгенерированы.")
+    def decrypt(self, ciphertext: str) -> str:
+        """Расшифровывает текст."""
+        if not ciphertext:
+            return ciphertext
+            
+        # Вычисляем обратный элемент для a
+        a_inv = self._mod_inverse(self.a)
         
-        plaintext = []
-        a_inv = mod_inverse(self.key_a, self.m)
+        result = []
         for char in ciphertext:
-            if char in self.char_to_int:
-                char_code = self.char_to_int[char]
-                decrypted_code = (a_inv * (char_code - self.key_b + self.m)) % self.m
-                plaintext.append(self.int_to_char[decrypted_code])
+            if char in self.alphabet:
+                # Находим индекс символа в алфавите
+                y = self.alphabet.index(char)
+                # Применяем формулу расшифровки: a^(-1)(y - b) mod m
+                x = (a_inv * (y - self.b)) % self.m
+                # Получаем расшифрованный символ
+                result.append(self.alphabet[x])
             else:
-                plaintext.append(char)
-        return "".join(plaintext)
+                # Если символ не в алфавите, оставляем как есть
+                result.append(char)
+        return ''.join(result)
 
 def generate_affine_params():
-    """Генерирует параметры аффинного шифра для русского и английского языков."""
-    cipher_ru = AffineCipher(lang='ru')
-    key_a_ru, key_b_ru = cipher_ru.generate_keys()
-
-    cipher_en = AffineCipher(lang='en')
-    key_a_en, key_b_en = cipher_en.generate_keys()
+    """Генерирует параметры аффинного шифра."""
+    cipher = AffineCipher()
+    key_a, key_b = cipher.generate_keys()
     
     return {
-        "ru": {"a": key_a_ru, "b": key_b_ru, "m": cipher_ru.m},
-        "en": {"a": key_a_en, "b": key_b_en, "m": cipher_en.m}
+        "a": key_a,
+        "b": key_b,
+        "m": cipher.m
     }
 
 def encrypt_with_params(text, lang, params):
     """Шифрует текст, используя предоставленные параметры аффинного шифра."""
-    cipher = AffineCipher(lang=lang)
+    cipher = AffineCipher()
     cipher.set_keys(params['a'], params['b'])
     return cipher.encrypt(text)
 
 def decrypt_with_params(ciphertext, lang, params):
     """Расшифровывает текст, используя предоставленные параметры аффинного шифра."""
-    cipher = AffineCipher(lang=lang)
+    cipher = AffineCipher()
     cipher.set_keys(params['a'], params['b'])
     return cipher.decrypt(ciphertext)
 
@@ -94,7 +124,7 @@ def determine_language_and_encrypt(text, affine_params_dict):
         lang = 'en' # По умолчанию или если поровну/нет букв
         params = affine_params_dict['en']
     
-    cipher = AffineCipher(lang=lang)
+    cipher = AffineCipher()
     cipher.set_keys(params['a'], params['b'])
     encrypted_text = cipher.encrypt(text)
     return encrypted_text, lang
@@ -104,6 +134,6 @@ def decrypt_based_on_lang(ciphertext, lang, affine_params_dict):
     if lang not in affine_params_dict:
         raise ValueError(f"Affine parameters for language '{lang}' not found.")
     params = affine_params_dict[lang]
-    cipher = AffineCipher(lang=lang)
+    cipher = AffineCipher()
     cipher.set_keys(params['a'], params['b'])
     return cipher.decrypt(ciphertext) 

@@ -923,7 +923,28 @@ public class EncryptionService {
             String senderPublicKeyE = packagePayload.getString("sender_public_key_e");
             
             CryptoLogWindow.logOperation("Получен пакет с общим секретом", 
-                "Отправитель: " + senderPublicKeyN.substring(0, 8) + "...");
+                "Отправитель: " + senderPublicKeyN.substring(0, 8) + "..., e=" + senderPublicKeyE);
+            
+            // Проверяем корректность публичного ключа отправителя
+            try {
+                RSA.PublicKey senderPublicKey = new RSA.PublicKey(
+                    new BigInteger(senderPublicKeyN), 
+                    new BigInteger(senderPublicKeyE));
+                
+                // Сохраняем информацию об отправителе (опционально)
+                // Здесь можно было бы добавить отправителя в список доверенных контактов
+                
+                // Проверка на корректность открытой экспоненты (должна быть нечетной и > 1)
+                if (senderPublicKey.e.compareTo(BigInteger.ONE) <= 0 || 
+                    senderPublicKey.e.mod(BigInteger.TWO).equals(BigInteger.ZERO)) {
+                    CryptoLogWindow.logOperation("Предупреждение", 
+                        "Необычная экспонента в публичном ключе отправителя: " + senderPublicKey.e);
+                }
+            } catch (Exception e) {
+                CryptoLogWindow.logOperation("Предупреждение", 
+                    "Невалидный формат публичного ключа отправителя: " + e.getMessage());
+                // Продолжаем выполнение, так как это не критическая ошибка
+            }
             
             // Расшифровываем общий секрет
             BigInteger sharedSecret = decryptSharedSecret(encryptedSecret);

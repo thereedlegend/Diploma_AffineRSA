@@ -6,7 +6,6 @@ import java.awt.Component;
 import java.awt.Dimension;
 import java.awt.FlowLayout;
 import java.awt.Frame;
-import java.awt.event.ActionEvent;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.util.List;
@@ -99,16 +98,16 @@ public class UserSearchDialog extends JDialog implements ThemedComponent {
         southWrapper.add(bottomPanel, BorderLayout.SOUTH);
         add(southWrapper, BorderLayout.SOUTH);
 
-        searchButton.addActionListener(this::performSearch);
-        searchField.addActionListener(this::performSearch); 
+        searchButton.addActionListener(_ -> performSearch());
+        searchField.addActionListener(_ -> performSearch()); 
 
-        resultsList.addListSelectionListener(e -> {
-            if (!e.getValueIsAdjusting()) {
+        resultsList.addListSelectionListener(_ -> {
+            if (!resultsList.getValueIsAdjusting()) {
                 startChatButton.setEnabled(resultsList.getSelectedValue() != null);
             }
         });
 
-        startChatButton.addActionListener(e -> {
+        startChatButton.addActionListener(_ -> {
             User selectedUser = resultsList.getSelectedValue();
             if (selectedUser != null && onUserSelectedForChat != null) {
                 onUserSelectedForChat.accept(selectedUser);
@@ -117,9 +116,10 @@ public class UserSearchDialog extends JDialog implements ThemedComponent {
         });
         
         resultsList.addMouseListener(new MouseAdapter() {
-            public void mouseClicked(MouseEvent evt) {
-                if (evt.getClickCount() == 2) {
-                    int index = resultsList.locationToIndex(evt.getPoint());
+            @Override
+            public void mouseClicked(MouseEvent e) {
+                if (e.getClickCount() == 2) {
+                    int index = resultsList.locationToIndex(e.getPoint());
                     if (index >= 0) {
                         resultsList.setSelectedIndex(index); 
                         User selectedUser = listModel.getElementAt(index);
@@ -133,9 +133,9 @@ public class UserSearchDialog extends JDialog implements ThemedComponent {
         });
     }
 
-    private void performSearch(ActionEvent e) {
-        String tag = searchField.getText().trim();
-        if (tag.isEmpty()) {
+    private void performSearch() {
+        String query = searchField.getText().trim();
+        if (query.isEmpty()) {
             statusLabel.setText("Поле поиска не должно быть пустым.");
             listModel.clear();
             startChatButton.setEnabled(false);
@@ -147,7 +147,7 @@ public class UserSearchDialog extends JDialog implements ThemedComponent {
         searchButton.setEnabled(false);
         searchField.setEnabled(false);
 
-        userService.searchUsers(tag, userList -> {
+        this.userService.searchUsers(query, userList -> {
             searchButton.setEnabled(true);
             searchField.setEnabled(true);
             searchField.requestFocusInWindow();

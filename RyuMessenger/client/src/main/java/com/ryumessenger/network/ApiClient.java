@@ -2,6 +2,10 @@ package com.ryumessenger.network;
 
 import java.net.URI;
 import java.util.function.Consumer;
+import java.util.Map;
+import java.math.BigInteger;
+import java.util.concurrent.CompletableFuture;
+import java.io.IOException;
 
 import org.json.JSONObject;
 import org.json.JSONArray;
@@ -13,10 +17,11 @@ import java.net.http.HttpResponse;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
-import com.ryumessenger.crypto.RSA;
 import com.ryumessenger.Main;
 import com.ryumessenger.model.User;
 import com.ryumessenger.ui.CryptoLogWindow;
+import com.ryumessenger.security.KeyManager;
+import com.ryumessenger.security.KeyManagerAdapter;
 
 public class ApiClient {
 
@@ -140,42 +145,87 @@ public class ApiClient {
         }
     }
 
+    /**
+     * Получает публичный ключ сервера и устанавливает его в KeyManager
+     * 
+     * @param callback Callback-функция, вызываемая по завершению
+     */
     public void fetchAndSetServerPublicKey(Consumer<Boolean> callback) {
-        CryptoLogWindow.logOperation("Запрос публичного ключа сервера", "Запрашиваем RSA и Affine ключи");
+        LOGGER.info("ApiClient: Отправляем запрос на получение публичного ключа сервера");
+        
         get("/keys", response -> {
-            if (response.isSuccess() && response.getJson() != null && 
-                response.getJson().has("rsa_public_key") && response.getJson().has("affine_params")) {
+            boolean success = false;
+            
+            if (response.isSuccess()) {
                 try {
-                    JSONObject rsaKeyJson = response.getJson().getJSONObject("rsa_public_key");
-                    String n = rsaKeyJson.getString("n");
-                    String e = rsaKeyJson.getString("e");
-                    
-                    JSONObject affineParamsJson = response.getJson().getJSONObject("affine_params");
-                    
-                    CryptoLogWindow.logOperation("Получены ключи сервера", "RSA ключ: n=" + n.substring(0, Math.min(20, n.length())) + "..., e=" + e);
-                    
-                    com.ryumessenger.crypto.KeyManager keyManager = com.ryumessenger.Main.getKeyManager();
-                    if (keyManager != null) {
-                        keyManager.setServerRsaPublicKey(n, e);
-                        keyManager.setServerAffineParams(affineParamsJson);
-                        LOGGER.log(Level.INFO, "ApiClient: Server public key and affine params fetched and set successfully.");
-                        CryptoLogWindow.logOperation("Сохранены ключи сервера", "Ключи успешно установлены в KeyManager");
-                        if (callback != null) callback.accept(true);
-                    } else {
-                        LOGGER.log(Level.SEVERE, "ApiClient: KeyManager not initialized. Cannot set server keys.");
-                        CryptoLogWindow.logOperation("Ошибка установки ключей", "KeyManager не инициализирован");
-                        if (callback != null) callback.accept(false);
-                    }
+                    JSONObject json = response.getJson();
+                    if (json != null && json.has("data")) {
+                        JSONObject data = json.getJSONObject("data");
+                        
+                        // Получаем данные ключа RSA
+                        if (data.has("rsa_public_key")) {
+                            JSONObject rsaKey = data.getJSONObject("rsa_public_key");
+                            String nStr = rsaKey.getString("n");
+                            String eStr = rsaKey.getString("e");
+                            BigInteger n = new BigInteger(nStr);
+                            BigInteger e = new BigInteger(eStr);
+                            
+                            // Устанавливаем ключ в новый com.ryumessenger.security.KeyManager
+                            KeyManager securityKeyManager = Main.getKeyManager(); // Это com.ryumessenger.security.KeyManager
+                            if (securityKeyManager != null) {
+                                securityKeyManager.setServerRSAPublicKey(n, e);
+                                LOGGER.info("ApiClient: Публичный RSA ключ сервера успешно установлен в security.KeyManager");
+                            } else {
+                                LOGGER.warning("ApiClient: security.KeyManager is null. Не удалось установить RSA ключ сервера.");
+                            }
+                            
+                            // Устанавливаем ключ в старый com.ryumessenger.crypto.KeyManager
+                            com.ryumessenger.crypto.KeyManager legacyKeyManager = Main.getLegacyKeyManager();
+                            if (legacyKeyManager != null) {
+                                legacyKeyManager.setServerRsaPublicKey(nStr, eStr); // Старый метод принимает строки
+                                LOGGER.info("ApiClient: Публичный RSA ключ сервера успешно установлен в legacy.KeyManager");
+                            } else {
+                                LOGGER.warning("ApiClient: legacy.KeyManager is null. Не удалось установить RSA ключ сервера.");
+                            }
+                        }
+                        
+                        // Получаем параметры Диффи-Хеллмана (публичный ключ сервера DH)
+                        if (data.has("dh_public_key_y")) {
+                            String dhPublicKeyYStr = data.getString("dh_public_key_y");
+                            BigInteger dhPublicKeyY = new BigInteger(dhPublicKeyYStr);
+                            
+                            KeyManager securityKeyManager = Main.getKeyManager(); // Это com.ryumessenger.security.KeyManager
+                            if (securityKeyManager != null) {
+                                try {
+                                    securityKeyManager.setServerDHPublicKey(dhPublicKeyY);
+                                    LOGGER.info("ApiClient: Публичный DH ключ сервера успешно установлен в security.KeyManager");
+                                } catch (Exception ex) {
+                                    LOGGER.log(Level.SEVERE, "ApiClient: Ошибка при установке DH ключа сервера в security.KeyManager", ex);
+                                }
+                            }
 
+                            // Также устанавливаем ключ и в KeyManagerAdapter, если он это поддерживает
+                            // KeyManagerAdapter имеет setServerDHPublicKey(BigInteger dhPublicKey)
+                            KeyManagerAdapter adapter = Main.getSecurityKeyManager();
+                            if (adapter != null) {
+                                try {
+                                    adapter.setServerDHPublicKey(dhPublicKeyY); // Адаптер должен быть способен обработать это
+                                    LOGGER.info("ApiClient: Публичный DH ключ сервера успешно установлен в KeyManagerAdapter");
+                                } catch (Exception ex) {
+                                    LOGGER.log(Level.WARNING, "Ошибка при установке ключа DH в KeyManagerAdapter", ex);
+                                }
+                            }
+                        }
+
+                        success = true; // Успех, если хотя бы что-то было установлено
+                    }
                 } catch (Exception e) {
-                    LOGGER.log(Level.SEVERE, "ApiClient: Failed to parse or set server public key and affine params.", e);
-                    CryptoLogWindow.logOperation("Ошибка обработки ключей", "Ошибка: " + e.getMessage());
-                    if (callback != null) callback.accept(false);
+                    LOGGER.log(Level.SEVERE, "ApiClient: Ошибка при обработке ключей сервера", e);
                 }
-            } else {
-                LOGGER.log(Level.WARNING, "ApiClient: Failed to fetch server public key. Response: " + response.getBody());
-                CryptoLogWindow.logOperation("Ошибка получения ключей", "Ответ сервера: " + response.getBody());
-                if (callback != null) callback.accept(false);
+            }
+            
+            if (callback != null) {
+                callback.accept(success);
             }
         });
     }
@@ -191,75 +241,98 @@ public class ApiClient {
 
     public void login(String username, String password, Consumer<ApiResponse> callback) {
         CryptoLogWindow.logOperation("Запрос на вход", "Пользователь: " + username);
-        
-        com.ryumessenger.crypto.EncryptionService encryptionService = Main.getEncryptionService();
-        com.ryumessenger.crypto.KeyManager keyManager = Main.getKeyManager();
 
-        if (encryptionService == null || keyManager == null) {
-            LOGGER.log(Level.SEVERE, "ApiClient: EncryptionService or KeyManager not initialized. Cannot proceed with login.");
-            CryptoLogWindow.logOperation("Ошибка входа", "EncryptionService или KeyManager не инициализированы");
+        com.ryumessenger.security.AuthPayloadFormatter authPayloadFormatter = Main.getAuthPayloadFormatter();
+
+        if (authPayloadFormatter == null) {
+            LOGGER.log(Level.SEVERE, "ApiClient: AuthPayloadFormatter not initialized. Cannot proceed with login.");
+            CryptoLogWindow.logOperation("Ошибка входа", "AuthPayloadFormatter не инициализирован");
             if (callback != null) callback.accept(new ApiResponse(500, "Client configuration error", null, null));
             return;
         }
 
-        RSA.PublicKey clientPublicKey = keyManager.getClientRsaPublicKey(); // Нужен для передачи в encryptLoginPayloadForServer, хотя он может быть и не использован внутри самого шифруемого JSON
-        if (clientPublicKey == null) {
-            LOGGER.log(Level.SEVERE, "ApiClient: Client public key is not available for login context.");
-            CryptoLogWindow.logOperation("Ошибка входа", "Отсутствует публичный ключ клиента");
-            // Не фатально для самого вызова encryptLoginPayloadForServer, если он не использует clientPublicKey внутри шифруемого JSON.
-            // Но если серверу он нужен для каких-то проверок, это может быть проблемой.
-        }
-
-        String encryptedLoginPayload = encryptionService.encryptLoginPayloadForServer(username, password, clientPublicKey);
-
-        if (encryptedLoginPayload == null) {
-            LOGGER.log(Level.SEVERE, "ApiClient: Failed to create encrypted login payload.");
-            CryptoLogWindow.logOperation("Ошибка входа", "Не удалось создать зашифрованные данные для входа");
-            if (callback != null) callback.accept(new ApiResponse(500, "Encryption error for login", null, null));
+        Map<String, Object> loginRequestMap;
+        try {
+            loginRequestMap = authPayloadFormatter.createLoginRequest(username, password);
+            if (loginRequestMap == null) {
+                throw new RuntimeException("createLoginRequest вернул null");
+            }
+        } catch (Exception e) {
+            LOGGER.log(Level.SEVERE, "ApiClient: Failed to create login request payload using AuthPayloadFormatter.", e);
+            CryptoLogWindow.logOperation("Ошибка входа", "Не удалось создать данные для входа: " + e.getMessage());
+            if (callback != null) callback.accept(new ApiResponse(500, "Encryption error for login: " + e.getMessage(), null, null));
             return;
         }
 
-        JSONObject requestBody = new JSONObject();
-        requestBody.put("username", username); // Имя пользователя передается открыто
-        requestBody.put("encrypted_login_payload", encryptedLoginPayload); // Зашифрованный JSON с деталями логина
+        String requestBodyString = new JSONObject(loginRequestMap).toString();
 
-        post("/login", requestBody.toString(), callback);
+        post("/login", requestBodyString, callback);
     }
 
+    /**
+     * @deprecated Используйте CompletableFuture<ApiResponse> register(Map<String, Object> registrationPayload)
+     */
+    @Deprecated
     public void register(String username, String password, String displayName, String tag, Consumer<ApiResponse> callback) {
-        com.ryumessenger.crypto.EncryptionService encryptionService = Main.getEncryptionService();
-        com.ryumessenger.crypto.KeyManager keyManager = Main.getKeyManager();
-
-        if (encryptionService == null || keyManager == null) {
-            LOGGER.log(Level.SEVERE, "ApiClient: EncryptionService or KeyManager not initialized for registration.");
-            if (callback != null) callback.accept(new ApiResponse(500, "Client configuration error", null, null));
-            return;
+        LOGGER.info("ApiClient: Регистрация пользователя " + username + " (СТАРЫЙ МЕТОД, используется Consumer)");
+        CryptoLogWindow.logOperation("Регистрация (старый)", "Пользователь: " + username);
+        
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("username", username);
+            payload.put("password", password); // Пароль здесь должен быть уже зашифрован?
+                                             // Старый метод, вероятно, ожидал сырой или как-то иначе обработанный пароль
+            payload.put("displayName", displayName);
+            payload.put("tag", tag);
+            
+            // Этот старый метод не использует AuthPayloadFormatter и RSA шифрование всего payload
+            // Он, вероятно, ожидает, что сервер сам обработает данные как есть или по-другому.
+            // Для новой логики используется перегруженный метод.
+            
+            post("/auth/register", payload.toString(), callback);
+        } catch (JSONException e) {
+            LOGGER.log(Level.SEVERE, "ApiClient: Ошибка при создании JSON для регистрации", e);
+            CryptoLogWindow.logOperation("Ошибка регистрации", "Ошибка JSON: " + e.getMessage());
+            callback.accept(new ApiResponse(500, "Ошибка создания запроса: " + e.getMessage(), null, null));
         }
+    }
 
-        RSA.PublicKey clientPublicKey = keyManager.getClientRsaPublicKey();
-        if (clientPublicKey == null) {
-            LOGGER.log(Level.SEVERE, "ApiClient: Client public key is not available for registration. Cannot provide n, e.");
-            if (callback != null) callback.accept(new ApiResponse(500, "Client key error for registration", null, null));
-            return;
+    /**
+     * Новый метод регистрации, принимающий Map<String, Object> и возвращающий CompletableFuture.
+     * Этот payload должен быть уже подготовлен AuthPayloadFormatter.
+     */
+    public CompletableFuture<ApiResponse> register(Map<String, Object> registrationPayload) {
+        LOGGER.info("ApiClient: Регистрация пользователя с использованием Map<String, Object> (новый метод)");
+        CryptoLogWindow.logOperation("Регистрация (новый)", "Отправка подготовленного payload...");
+        
+        CompletableFuture<ApiResponse> future = new CompletableFuture<>();
+        
+        try {
+            String jsonPayload = new JSONObject(registrationPayload).toString();
+            
+            // Используем performRequestAsync (если есть) или адаптируем performRequest
+            // Для простоты создадим новую обертку, возвращающую CompletableFuture
+            // или модифицируем performRequest, чтобы он мог возвращать CompletableFuture.
+            // Пока что воспользуемся существующим post, который принимает Consumer.
+            
+            post("/auth/register", jsonPayload, apiResponse -> {
+                if (apiResponse.getStatusCode() == 0 && apiResponse.getBody() != null && apiResponse.getBody().startsWith("java.net.ConnectException")) {
+                     // Особая обработка ошибки соединения для CompletableFuture
+                    future.completeExceptionally(new IOException("Ошибка соединения: " + apiResponse.getBody()));
+                } else if (apiResponse.isSuccess()) {
+                    future.complete(apiResponse);
+                } else {
+                    // Оборачиваем неуспешный ответ в исключение, чтобы его можно было поймать в exceptionally()
+                    future.completeExceptionally(new ApiException("Ошибка регистрации: " + apiResponse.getErrorMessage(), apiResponse));
+                }
+            });
+            
+        } catch (Exception e) { // Включая JSONException, если new JSONObject(map) его бросит
+            LOGGER.log(Level.SEVERE, "ApiClient: Ошибка при создании JSON для регистрации из Map", e);
+            CryptoLogWindow.logOperation("Ошибка регистрации (новый)", "Ошибка JSON: " + e.getMessage());
+            future.completeExceptionally(e);
         }
-
-        String encryptedPasswordPayload = encryptionService.encryptRegistrationPayloadForServer(username, password, displayName, tag, clientPublicKey);
-
-        if (encryptedPasswordPayload == null) {
-            LOGGER.log(Level.SEVERE, "ApiClient: Failed to create encrypted registration payload.");
-            if (callback != null) callback.accept(new ApiResponse(500, "Encryption error for registration", null, null));
-            return;
-        }
-
-        JSONObject requestBody = new JSONObject();
-        requestBody.put("username", username);
-        requestBody.put("display_name", displayName);
-        requestBody.put("tag", tag);
-        requestBody.put("encrypted_password_payload", encryptedPasswordPayload); // Зашифрованный JSON с деталями регистрации
-        requestBody.put("rsa_public_key_n", clientPublicKey.n.toString()); // Открытый ключ клиента (n,e) передается отдельно
-        requestBody.put("rsa_public_key_e", clientPublicKey.e.toString());
-
-        post("/register", requestBody.toString(), callback);
+        return future;
     }
 
     public void logout(Consumer<ApiResponse> callback) {
@@ -267,26 +340,39 @@ public class ApiClient {
     }
 
     public void changePassword(String currentPassword, String newPassword, Consumer<ApiResponse> callback) {
-        com.ryumessenger.crypto.EncryptionService encryptionService = Main.getEncryptionService();
+        com.ryumessenger.security.AuthPayloadFormatter authPayloadFormatter = Main.getAuthPayloadFormatter();
+        com.ryumessenger.security.KeyManager keyManager = Main.getKeyManager();
         User currentUser = Main.getCurrentUser();
 
-        if (encryptionService == null) {
-            LOGGER.log(Level.SEVERE, "ApiClient: EncryptionService not initialized for changePassword.");
-            if (callback != null) callback.accept(new ApiResponse(500, "Client configuration error", null, null));
+        if (authPayloadFormatter == null) {
+            LOGGER.log(Level.SEVERE, "ApiClient: AuthPayloadFormatter not initialized for changePassword.");
+            if (callback != null) callback.accept(new ApiResponse(500, "Client configuration error for changePassword", null, null));
+            return;
+        }
+        if (keyManager == null) {
+            LOGGER.log(Level.SEVERE, "ApiClient: KeyManager (security) not initialized for changePassword.");
+            if (callback != null) callback.accept(new ApiResponse(500, "Client configuration error (KeyManager missing) for changePassword", null, null));
             return;
         }
         if (currentUser == null) {
             LOGGER.log(Level.SEVERE, "ApiClient: No current user found for changePassword.");
-            if (callback != null) callback.accept(new ApiResponse(401, "User not logged in", null, null)); // 401 Unauthorized
+            if (callback != null) callback.accept(new ApiResponse(401, "User not logged in", null, null));
             return;
         }
 
-        String userId = String.valueOf(currentUser.getId());
-        String encryptedUpdatePayload = encryptionService.encryptChangePasswordPayloadForServer(userId, currentPassword, newPassword);
-
-        if (encryptedUpdatePayload == null) {
-            LOGGER.log(Level.SEVERE, "ApiClient: Failed to create encrypted change password payload.");
-            if (callback != null) callback.accept(new ApiResponse(500, "Encryption error for change password", null, null));
+        String encryptedUpdatePayload;
+        try {
+            String clientDhPublicKeyY = keyManager.getClientDHPublicKeyY().toString();
+            if (clientDhPublicKeyY == null) {
+                 throw new RuntimeException("Client DH public key is null");
+            }
+            encryptedUpdatePayload = authPayloadFormatter.formatChangePasswordPayload(currentPassword, newPassword, clientDhPublicKeyY);
+            if (encryptedUpdatePayload == null) {
+                throw new RuntimeException("formatChangePasswordPayload вернул null");
+            }
+        } catch (Exception e) {
+            LOGGER.log(Level.SEVERE, "ApiClient: Failed to create encrypted change password payload.", e);
+            if (callback != null) callback.accept(new ApiResponse(500, "Encryption error for change password: " + e.getMessage(), null, null));
             return;
         }
 
@@ -430,6 +516,32 @@ public class ApiClient {
 
         public int getStatusCode() {
             return statusCode;
+        }
+
+        public String getErrorMessage() {
+            if (json != null && json.has("message")) {
+                return json.getString("message");
+            }
+            if (json != null && json.has("error")) {
+                return json.getString("error");
+            }
+            // Если тело ответа содержит сообщение об ошибке (например, при статусе 4xx, 5xx без JSON)
+            if (!isSuccess() && body != null && !body.trim().isEmpty() && body.length() < 200) { // Ограничим длину, чтобы не возвращать HTML страницы ошибок
+                return body; 
+            }
+            return "Неизвестная ошибка (код: " + statusCode + ")";
+        }
+    }
+    
+    // Вспомогательный класс исключения для CompletableFuture
+    public static class ApiException extends Exception {
+        private final ApiResponse apiResponse;
+        public ApiException(String message, ApiResponse apiResponse) {
+            super(message);
+            this.apiResponse = apiResponse;
+        }
+        public ApiResponse getApiResponse() {
+            return apiResponse;
         }
     }
 }

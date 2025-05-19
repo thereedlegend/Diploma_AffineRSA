@@ -38,6 +38,16 @@ public class User {
         }
     }
 
+    // Конструктор для создания пользователя из отдельных полей
+    public User(int id, String username, String displayName, String tag) {
+        this.id = id;
+        this.username = username;
+        this.displayName = displayName;
+        this.tag = tag;
+        this.rsaPublicKeyN = null;
+        this.rsaPublicKeyE = null;
+    }
+
     public int getId() {
         return id;
     }

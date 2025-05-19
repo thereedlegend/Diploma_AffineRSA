@@ -88,17 +88,28 @@ def create_app(config_object='RyuMessenger.server.core.config'):
     if not os.path.exists(os.path.dirname(LOG_PATH)):
         os.makedirs(os.path.dirname(LOG_PATH))
     
-    # Удаляем все существующие обработчики логов (для отключения вывода в терминал)
+    # Удаляем все существующие обработчики логов
     for handler in app.logger.handlers:
         app.logger.removeHandler(handler)
     
-    handler = RotatingFileHandler(LOG_PATH, maxBytes=10485760, backupCount=3, encoding='utf-8')
-    handler.setFormatter(logging.Formatter(
+    # Создаем форматтер для логов
+    formatter = logging.Formatter(
         '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
-    ))
-    handler.setLevel(logging.INFO)
-    app.logger.addHandler(handler)
-    app.logger.setLevel(logging.INFO)
+    )
+    
+    # Файловый обработчик
+    file_handler = RotatingFileHandler(LOG_PATH, maxBytes=10485760, backupCount=3, encoding='utf-8')
+    file_handler.setFormatter(formatter)
+    file_handler.setLevel(logging.INFO)
+    app.logger.addHandler(file_handler)
+    
+    # Консольный обработчик
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(formatter)
+    console_handler.setLevel(logging.DEBUG)  # В консоль выводим все уровни для отладки
+    app.logger.addHandler(console_handler)
+    
+    app.logger.setLevel(logging.DEBUG)  # Устанавливаем уровень логирования DEBUG для всех логгеров
     
     # Добавляем фильтр для исключения регулярных запросов
     app.logger.addFilter(RegularRequestsFilter())
@@ -107,31 +118,49 @@ def create_app(config_object='RyuMessenger.server.core.config'):
     werkzeug_logger = logging.getLogger('werkzeug')
     werkzeug_logger.addFilter(RegularRequestsFilter())
     
-    # Убираем существующие обработчики и добавляем новый с правильной кодировкой
+    # Убираем существующие обработчики и добавляем новые с правильной кодировкой
     for handler in werkzeug_logger.handlers:
         werkzeug_logger.removeHandler(handler)
-    werkzeug_handler = RotatingFileHandler(LOG_PATH, maxBytes=10485760, backupCount=3, encoding='utf-8')
-    werkzeug_handler.setFormatter(logging.Formatter(
-        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
-    ))
-    werkzeug_logger.addHandler(werkzeug_handler)
+    
+    werkzeug_file_handler = RotatingFileHandler(LOG_PATH, maxBytes=10485760, backupCount=3, encoding='utf-8')
+    werkzeug_file_handler.setFormatter(formatter)
+    werkzeug_logger.addHandler(werkzeug_file_handler)
+    
+    werkzeug_console_handler = logging.StreamHandler()
+    werkzeug_console_handler.setFormatter(formatter)
+    werkzeug_console_handler.setLevel(logging.DEBUG)
+    werkzeug_logger.addHandler(werkzeug_console_handler)
     
     # Также фильтруем логи от самого Flask
     flask_logger = logging.getLogger('flask')
     flask_logger.addFilter(RegularRequestsFilter())
     
-    # Убираем существующие обработчики и добавляем новый с правильной кодировкой
+    # Убираем существующие обработчики и добавляем новые с правильной кодировкой
     for handler in flask_logger.handlers:
         flask_logger.removeHandler(handler)
-    flask_handler = RotatingFileHandler(LOG_PATH, maxBytes=10485760, backupCount=3, encoding='utf-8')
-    flask_handler.setFormatter(logging.Formatter(
-        '%(asctime)s %(levelname)s: %(message)s [in %(pathname)s:%(lineno)d]'
-    ))
-    flask_logger.addHandler(flask_handler)
+    
+    flask_file_handler = RotatingFileHandler(LOG_PATH, maxBytes=10485760, backupCount=3, encoding='utf-8')
+    flask_file_handler.setFormatter(formatter)
+    flask_logger.addHandler(flask_file_handler)
+    
+    flask_console_handler = logging.StreamHandler()
+    flask_console_handler.setFormatter(formatter)
+    flask_console_handler.setLevel(logging.DEBUG)
+    flask_logger.addHandler(flask_console_handler)
     
     # И наконец настраиваем корневой логгер
     root_logger = logging.getLogger()
     root_logger.addFilter(RegularRequestsFilter())
+    
+    # Добавляем обработчики для корневого логгера
+    root_file_handler = RotatingFileHandler(LOG_PATH, maxBytes=10485760, backupCount=3, encoding='utf-8')
+    root_file_handler.setFormatter(formatter)
+    root_logger.addHandler(root_file_handler)
+    
+    root_console_handler = logging.StreamHandler()
+    root_console_handler.setFormatter(formatter)
+    root_console_handler.setLevel(logging.DEBUG)
+    root_logger.addHandler(root_console_handler)
     
     app.logger.info('RyuMessenger server startup')
     
@@ -231,14 +260,6 @@ def create_app(config_object='RyuMessenger.server.core.config'):
         
         # Не пропускаем фактическую обработку запроса
         return None
-
-    # Контекст запроса для сервисов, чтобы не передавать их в каждый view
-    # Альтернатива - использовать g из Flask, но это менее явно
-    # @app.before_request
-    # def load_services():
-    #     g.encryption_service = app.encryption_service
-    #     g.user_service = app.user_service
-    #     g.message_service = app.message_service
 
     # Установка таймера для периодической очистки устаревших первых запросов
     # Запускаем очистку каждый час

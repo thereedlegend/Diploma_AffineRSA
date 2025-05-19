@@ -9,160 +9,137 @@ class UserService:
     def __init__(self, encryption_service: EncryptionService):
         self.encryption_service = encryption_service
 
-    def register_user(self, username: str, encrypted_password_payload: str, client_rsa_public_key_n: str, client_rsa_public_key_e: str, tag: str = None, display_name: str = None):
+    def register_user(self, username: str, encrypted_password_payload: str, client_rsa_public_key_n: str, client_rsa_public_key_e: str, tag: str, display_name: str) -> tuple[bool, str]:
+        """Регистрирует нового пользователя."""
+        try:
+            # 1. Проверяем, не занято ли имя пользователя
+            if self.get_user_by_username(username):
+                return False, "Username already taken"
+
+            # 2. Проверяем, не занят ли тег
+            if check_tag_exists(tag):
+                return False, "Tag already taken"
+
+            # 3. Расшифровываем payload с паролем
+            try:
+                decrypted_payload = self.encryption_service.server_rsa_cipher.decrypt_text_chunked(encrypted_password_payload)
+                current_app.logger.error(f"[DEBUG] Decrypted password payload: {decrypted_payload}")
+                password_info = json.loads(decrypted_payload)
+                current_app.logger.error(f"[DEBUG] password_info (parsed): {password_info}")
+                
+                if not isinstance(password_info, dict) or 'cipher_text' not in password_info or 'affine_params' not in password_info:
+                    current_app.logger.error(f"[DEBUG] password_info missing fields: {password_info}")
+                    return False, "Invalid password payload structure"
+                
+                password_ciphertext = password_info['cipher_text']
+                affine_params = password_info['affine_params']
+                
+            except Exception as e:
+                current_app.logger.error(f"Error decrypting password payload: {e}")
+                return False, "Failed to decrypt password payload"
+            
+            # 4. Создаем запись пользователя
+            conn = get_db_connection()
+            try:
+                cursor = conn.cursor()
+                cursor.execute(
+                    '''INSERT INTO users 
+                       (username, password_ciphertext, tag, display_name, rsa_public_key_n, rsa_public_key_e, affine_a, affine_b, lang) 
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)''',
+                    (username, password_ciphertext, tag, display_name, 
+                     client_rsa_public_key_n, client_rsa_public_key_e,
+                     affine_params['a'], affine_params['b'], affine_params.get('lang', 'en'))
+                )
+                user_id = cursor.lastrowid
+                conn.commit()
+                current_app.logger.info(f"User {username} registered successfully with ID {user_id}")
+                return True, "Registration successful"
+                
+            except sqlite3.Error as e:
+                conn.rollback()
+                current_app.logger.error(f"Database error during registration: {e}")
+                return False, "Database error during registration"
+            finally:
+                conn.close()
+                
+        except Exception as e:
+            current_app.logger.error(f"Error during user registration: {e}", exc_info=True)
+            return False, f"Registration failed: {str(e)}"
+
+    def authenticate_user(self, username: str, encrypted_login_payload: str) -> tuple[dict | None, str]:
         """
-        Регистрирует нового пользователя.
-        encrypted_password_payload: RSA-зашифрованная строка JSON от клиента, содержащая:
-                                    { "username": "...", "password": "...", "display_name": "...", "tag": "..." }
-        client_rsa_public_key_n, client_rsa_public_key_e: Публичный RSA ключ клиента.
+        Аутентифицирует пользователя по имени пользователя и зашифрованному логину.
+        Возвращает (user_data, message) где user_data это словарь с данными пользователя или None при ошибке.
         """
-        if tag is None:
-            tag = username
-        if not display_name or not display_name.strip():
-            current_app.logger.warning(f"Registration attempt failed for {username}: Display name is required.")
-            return None, "Display name is required."
-        if check_username_exists(username):
-            current_app.logger.warning(f"Registration attempt failed for {username}: Username already exists.")
-            return None, "User with this username already exists."
-        if check_tag_exists(tag):
-            current_app.logger.warning(f"Registration attempt failed for {username} (tag {tag}): Tag already exists.")
-            return None, "User with this tag already exists."
+        current_app.logger.debug(f"Attempting to authenticate user: {username}")
         
         try:
-            # 1. Расшифровать RSA payload от клиента
-            decrypted_client_payload_json = self.encryption_service.server_rsa_cipher.decrypt_text_chunked(encrypted_password_payload)
-            client_payload = json.loads(decrypted_client_payload_json)
-
-            # 2. Извлечь пароль из расшифрованного JSON
-            # Убедимся, что необходимые поля присутствуют в расшифрованном JSON от клиента
-            if not (isinstance(client_payload, dict) and \
-                    'username' in client_payload and \
-                    'password' in client_payload and \
-                    'display_name' in client_payload and \
-                    'tag' in client_payload):
-                current_app.logger.error(f"Invalid client payload structure after RSA decryption: {client_payload}")
-                return None, "Decrypted client payload is not valid JSON or missing required fields (username, password, display_name, tag)."
-
-            plain_password = client_payload.get('password')
-            if not plain_password: # Дополнительная проверка, хотя 'password' in client_payload уже это покрывает
-                current_app.logger.error(f"Password missing in decrypted client payload for {username}")
-                return None, "Password missing in decrypted client payload."
-
-            # 3. Подготовить пароль для хранения (аффинное шифрование)
-            # Определяем язык для аффинного шифра (можно взять из display_name или username, или передавать явно)
-            # В реальном приложении язык лучше определять более надежно или дать пользователю выбор.
-            lang_for_affine = self.encryption_service.determine_language(plain_password) # Используем метод из EncryptionService
+            # 1. Расшифровываем payload
+            decrypted_payload = self.decrypt_affine_rsa_payload_to_text(encrypted_login_payload)
+            if not decrypted_payload:
+                current_app.logger.warning(f"Failed to decrypt login payload for user {username}")
+                return None, "Invalid login payload"
             
-            # Создаем экземпляр AffineCipher для нужного языка, чтобы получить m
-            # и затем использовать его для шифрования
-            cipher = AffineCipher(lang=lang_for_affine)
-            m = cipher.m # Получаем m из экземпляра
+            current_app.logger.debug(f"Successfully decrypted login payload for user {username}")
             
-            # Генерируем случайный b для аффинного шифра (a=1)
-            affine_a = 1 
-            affine_b = self.encryption_service.generate_random_affine_b(m)
-
-            # Устанавливаем ключи для этого же экземпляра cipher и шифруем пароль
-            cipher.set_keys(affine_a, affine_b)
-            affine_cipher_text_password = cipher.encrypt(plain_password)
-
-            # 4. Создать JSON для хранения информации о пароле в БД
-            password_info_for_db = {
-                "cipher_text": affine_cipher_text_password,
-                "affine_params": {"a": affine_a, "b": affine_b, "m": m},
-                "lang": lang_for_affine
-            }
-            password_info_for_db_json = json.dumps(password_info_for_db)
-            current_app.logger.debug(f"Storing password info for {username}: {password_info_for_db_json}")
-
-        except json.JSONDecodeError as e:
-            current_app.logger.error(f"JSONDecodeError while processing payload for {username}: {e}. Payload: {decrypted_client_payload_json[:200]}")
-            return None, "Failed to parse decrypted client payload."
-        except KeyError as e:
-            current_app.logger.error(f"KeyError: Missing expected key in client payload for {username}: {e}. Payload: {client_payload}")
-            return None, f"Missing expected data in client payload: {e}."
-        except Exception as e: # Общий обработчик ошибок шифрования/расшифровки
-            current_app.logger.error(f"Error processing password payload for {username} during registration: {e}", exc_info=True)
-            return None, f"Error processing password for registration: {e}"
-
-        # 5. Сохранить пользователя в БД
-        # Используем username, tag, display_name из НЕЗАШИФРОВАННОЙ части запроса, как и раньше
-        # А password_info_for_db_json - это наш новый JSON для хранения пароля
-        user_id = add_user(username, tag, display_name, password_info_for_db_json, str(client_rsa_public_key_n), str(client_rsa_public_key_e))
-        if user_id:
-            current_app.logger.info(f"User {username} (tag: {tag}) registered successfully with ID: {user_id}")
-            return user_id, "User registered successfully."
-        else:
-            # Эта ветка маловероятна, если add_user не возвращает None при ошибке, а кидает исключение,
-            # но оставим для полноты, если add_user может вернуть None по какой-то причине без исключения.
-            current_app.logger.error(f"Failed to add user {username} to database, add_user returned None.")
-            return None, "Failed to register user due to a database error."
-
-    def authenticate_user(self, username: str, encrypted_login_payload: str):
-        """
-        Аутентифицирует пользователя по тегу.
-        encrypted_login_payload: RSA-зашифрованная строка JSON от клиента, содержащая:
-                                   { "cipher_text": "аффинный_шифротекст_пароля_для_входа",
-                                     "affine_params": { "a": ..., "b": ..., "m": ...},
-                                     "lang": "ru" или "en" }
-        """
-        user_row = get_user_by_username(username)
-        if not user_row:
-            print(f"[AUTH] Пользователь не найден: {username}")
-            return None, "Invalid username or password."
-        try:
-            client_provided_login_info_json = self.encryption_service.server_rsa_cipher.decrypt_text_chunked(encrypted_login_payload)
-            client_provided_login_info = json.loads(client_provided_login_info_json)
-            if not (isinstance(client_provided_login_info, dict) and 'cipher_text' in client_provided_login_info and 'affine_params' in client_provided_login_info and 'lang' in client_provided_login_info):
-                return None, "Login payload is not valid JSON or missing required fields."
-        except (ValueError, json.JSONDecodeError) as e:
-            return None, f"Failed to decrypt or parse login payload: {e}"
-        stored_password_info_json = user_row['password_info']
-        try:
-            stored_password_info = json.loads(stored_password_info_json)
-            if not (isinstance(stored_password_info, dict) and 'cipher_text' in stored_password_info and 'affine_params' in stored_password_info and 'lang' in stored_password_info):
-                return None, "Corrupted stored password information for user."
-        except json.JSONDecodeError:
-            return None, "Corrupted stored password information for user."
-        try:
-            if not isinstance(client_provided_login_info, dict):
-                return None, f"Invalid login payload structure: {type(client_provided_login_info)}."
-            if not isinstance(stored_password_info, dict):
-                return None, f"Invalid stored password structure: {type(stored_password_info)}."
-            decrypted_password_attempt = decrypt_based_on_lang(
-                client_provided_login_info['cipher_text'],
-                client_provided_login_info['lang'],
-                {client_provided_login_info['lang']: client_provided_login_info['affine_params']}
-            )
-            if not isinstance(decrypted_password_attempt, str):
-                print(f"[ERROR] decrypted_password_attempt не строка: {type(decrypted_password_attempt)} -> {repr(decrypted_password_attempt)}")
-                return None, f"Ошибка дешифровки пароля: результат не строка ({type(decrypted_password_attempt)})."
-            decrypted_stored_password = decrypt_based_on_lang(
-                stored_password_info['cipher_text'],
-                stored_password_info['lang'],
-                {stored_password_info['lang']: stored_password_info['affine_params']}
-            )
-            if not isinstance(decrypted_stored_password, str):
-                print(f"[ERROR] decrypted_stored_password не строка: {type(decrypted_stored_password)} -> {repr(decrypted_stored_password)}")
-                return None, f"Ошибка дешифровки пароля из БД: результат не строка ({type(decrypted_stored_password)})."
-        except Exception as e:
-             return None, f"Error processing password for authentication: {e}"
-        if decrypted_password_attempt == decrypted_stored_password:
-            user_data = {
-                "id": user_row['id'],
-                "username": user_row['username'],
-                "tag": user_row['tag'],
-                "display_name": user_row['display_name'],
-                "rsa_public_key": {
-                    "n": user_row['rsa_public_key_n'],
-                    "e": user_row['rsa_public_key_e']
+            # 2. Парсим JSON
+            try:
+                login_data = json.loads(decrypted_payload)
+            except json.JSONDecodeError as e:
+                current_app.logger.error(f"Failed to parse decrypted login payload as JSON: {e}")
+                return None, "Invalid login data format"
+            
+            # 3. Проверяем наличие обязательных полей
+            required_fields = ['password', 'affine_params']
+            missing_fields = [field for field in required_fields if field not in login_data]
+            if missing_fields:
+                current_app.logger.warning(f"Missing required fields in login data: {missing_fields}")
+                return None, f"Missing required fields: {', '.join(missing_fields)}"
+            
+            # 4. Получаем пользователя из БД
+            conn = get_db_connection()
+            try:
+                user = conn.execute(
+                    'SELECT * FROM users WHERE username = ?', 
+                    (username,)
+                ).fetchone()
+                
+                if not user:
+                    current_app.logger.warning(f"User not found: {username}")
+                    return None, "Invalid username or password"
+                
+                # 5. Проверяем пароль
+                stored_password_info = {
+                    'password_ciphertext': user['password_ciphertext'],
+                    'affine_a': user['affine_a'],
+                    'affine_b': user['affine_b'],
+                    'lang': user['lang']
                 }
-            }
-            print(f"[AUTH] Успешная аутентификация: {user_data}")
-            return user_data, "Authentication successful."
-        else:
-            print(f"[AUTH] Неверный пароль для пользователя: {username}")
-            return None, "Invalid username or password."
+                
+                if not self.encryption_service.verify_affine_password(
+                    login_data['password'],
+                    login_data['affine_params'],
+                    stored_password_info
+                ):
+                    current_app.logger.warning(f"Invalid password for user: {username}")
+                    return None, "Invalid username or password"
+                
+                current_app.logger.info(f"User {username} authenticated successfully")
+                
+                # 6. Возвращаем данные пользователя
+                return {
+                    'id': user['id'],
+                    'username': user['username'],
+                    'tag': user['tag'],
+                    'created_at': user['created_at']
+                }, "Login successful"
+                
+            finally:
+                conn.close()
+                
+        except Exception as e:
+            current_app.logger.error(f"Error during user authentication: {e}", exc_info=True)
+            return None, "Authentication failed"
 
     def find_user_by_tag(self, tag: str):
         user_row = get_user_by_tag(tag)
@@ -420,4 +397,12 @@ class UserService:
                 return None
         except Exception as e:
             current_app.logger.error(f"Error in _decrypt_rsa_payload_to_inner_json_dict: {e}")
-            return None 
+            return None
+
+    def get_user_by_username(self, username: str):
+        """Возвращает пользователя по username или None."""
+        return get_user_by_username(username)
+
+    def get_user_by_tag(self, tag: str):
+        """Возвращает пользователя по tag или None."""
+        return get_user_by_tag(tag) 
