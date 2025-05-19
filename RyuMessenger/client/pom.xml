@@ -37,6 +37,18 @@
             <version>1.77</version>
         </dependency>
         
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcpkix-jdk18on</artifactId>
+            <version>1.77</version>
+        </dependency>
+        
+        <dependency>
+            <groupId>org.bouncycastle</groupId>
+            <artifactId>bcutil-jdk18on</artifactId>
+            <version>1.77</version>
+        </dependency>
+        
         <!-- Jackson Databind for JSON processing -->
         <dependency>
             <groupId>com.fasterxml.jackson.core</groupId>
@@ -65,30 +77,39 @@
             </plugin>
             
             <plugin>
-                <!-- Плагин для создания исполняемого JAR -->
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-assembly-plugin</artifactId>
-                <version>3.7.0</version> <!-- Обновлено -->
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.3.0</version>
                 <configuration>
                     <archive>
                         <manifest>
+                            <addClasspath>true</addClasspath>
+                            <classpathPrefix>lib/</classpathPrefix>
                             <mainClass>com.ryumessenger.Main</mainClass>
                         </manifest>
                     </archive>
-                    <descriptorRefs>
-                        <descriptorRef>jar-with-dependencies</descriptorRef>
-                    </descriptorRefs>
                 </configuration>
+            </plugin>
+
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.6.1</version>
                 <executions>
                     <execution>
-                        <id>make-assembly</id>
+                        <id>copy-dependencies</id>
                         <phase>package</phase>
                         <goals>
-                            <goal>single</goal>
+                            <goal>copy-dependencies</goal>
                         </goals>
+                        <configuration>
+                            <outputDirectory>${project.build.directory}/lib</outputDirectory>
+                            <includeScope>runtime</includeScope> 
+                        </configuration>
                     </execution>
                 </executions>
             </plugin>
+
             <!-- 
             Плагин для сборки в .exe (например, launch4j-maven-plugin)
             Это более сложная настройка, требующая launch4j или аналогичного инструмента.
@@ -98,7 +119,7 @@
              <plugin>
                 <groupId>com.akathist.maven.plugins.launch4j</groupId>
                 <artifactId>launch4j-maven-plugin</artifactId>
-                <version>2.5.0</version> <!-- Обновлено -->
+                <version>0.9.1.9</version> <!-- Обновлено -->
                 <executions>
                     <execution>
                         <id>l4j-clui</id>
@@ -109,15 +130,15 @@
                         <configuration>
                             <headerType>gui</headerType>
                             <outfile>target/RyuMessenger.exe</outfile>
-                            <jar>target/${project.artifactId}-${project.version}-jar-with-dependencies.jar</jar>
+                            <jar>target/${project.artifactId}-${project.version}.jar</jar>
                             <errTitle>RyuMessenger Error</errTitle>
                             <classPath>
                                 <mainClass>com.ryumessenger.Main</mainClass>
                                 <addDependencies>true</addDependencies>
-                                <jarLocation>./lib</jarLocation> <!-- Define where dependencies will be if not included in the main jar -->
+                                <jarLocation>lib</jarLocation>
                             </classPath>
                              <jre>
-                                <minVersion>24</minVersion> <!-- Обновлено -->
+                                <minVersion>24</minVersion>
                                 <!-- Можно указать bundled JRE, если необходимо -->
                                 <!-- <path>./jre</path> --> 
                             </jre>

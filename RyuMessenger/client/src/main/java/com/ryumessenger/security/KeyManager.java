@@ -10,12 +10,18 @@ import java.security.interfaces.RSAPublicKey;
 import java.security.spec.*;
 import javax.crypto.KeyAgreement;
 import javax.crypto.spec.DHParameterSpec;
-import javax.crypto.spec.DHPublicKeySpec;
 
 import org.bouncycastle.jce.provider.BouncyCastleProvider;
 import org.bouncycastle.util.io.pem.PemObject;
 import org.bouncycastle.util.io.pem.PemReader;
 import org.bouncycastle.util.io.pem.PemWriter;
+import org.bouncycastle.asn1.ASN1EncodableVector;
+import org.bouncycastle.asn1.ASN1Integer;
+import org.bouncycastle.asn1.DERSequence;
+import org.bouncycastle.asn1.DERBitString;
+import org.bouncycastle.asn1.x509.AlgorithmIdentifier;
+import org.bouncycastle.asn1.x509.SubjectPublicKeyInfo;
+import org.bouncycastle.asn1.pkcs.PKCSObjectIdentifiers;
 
 import com.ryumessenger.util.Logger;
 import java.nio.file.Paths;
@@ -49,11 +55,23 @@ public class KeyManager implements AutoCloseable {
     private boolean dhParametersSet = false;
     
     static {
+        // Попытка сначала удалить провайдера, если он уже зарегистрирован некорректно
+        Provider existingBC = Security.getProvider(BouncyCastleProvider.PROVIDER_NAME);
+        if (existingBC != null) {
+            Logger.info("BouncyCastle provider already registered. Attempting to remove and re-add to ensure correct loading from classpath.");
+            Security.removeProvider(BouncyCastleProvider.PROVIDER_NAME);
+        }
+
+        // Добавляем провайдер BouncyCastle
+        // Это предпочтительный способ добавления, так как он берет провайдер из classpath,
+        // где должен лежать официальный подписанный JAR BouncyCastle.
         if (Security.getProvider(BouncyCastleProvider.PROVIDER_NAME) == null) {
-            Security.addProvider(new BouncyCastleProvider());
-            Logger.info("BouncyCastle provider added.");
+            Security.addProvider(new BouncyCastleProvider()); // Этот экземпляр будет создан из кода BC, который есть в classpath
+            Logger.info("BouncyCastle provider added/re-added.");
         } else {
-            Logger.info("BouncyCastle provider already registered.");
+            // Если после удаления он все еще есть (маловероятно, но возможно при параллельной загрузке)
+            // или если удаление не удалось по какой-то причине.
+            Logger.info("BouncyCastle provider was already registered and could not be re-added, or re-addition was not necessary.");
         }
     }
     
@@ -138,13 +156,36 @@ public class KeyManager implements AutoCloseable {
     }
     
     private void generateAndSaveNewDHKeys() throws Exception {
-        DHParameterSpec dhParams = new DHParameterSpec(clientDhP, clientDhG, 0);
-        KeyPairGenerator keyGen = KeyPairGenerator.getInstance("DH", "BC");
-        keyGen.initialize(dhParams);
+        if (this.clientDhP == null || this.clientDhG == null) {
+            Logger.error("DH параметры P и G не установлены в KeyManager. Невозможно сгенерировать DH ключи.");
+            throw new IllegalStateException("DH параметры P и G не установлены.");
+        }
+
+        int lValue = 0; // Значение по умолчанию для l (длина приватного экспонента в битах)
+        // Если P очень мало (например, P=23, bitLength=5), BouncyCastle требует явного указания l.
+        // Для P=23, G=5, порядок подгруппы q=22. Приватный ключ x < 22. Битовая длина x <= 5.
+        // Мы установим l равным битовой длине P, если P меньше некоторого порога (например, 64 бита).
+        if (clientDhP.bitLength() < 64) { 
+            lValue = clientDhP.bitLength();
+            Logger.info("DH P (" + clientDhP.toString() + ") имеет малую битовую длину (" + clientDhP.bitLength() + "). Устанавливаем l=" + lValue + " для генерации DH ключей.");
+        } else {
+            // Для больших P, l=0 означает, что размер приватного ключа будет выбран провайдером
+            // на основе размера P, обычно это значение около 160-256 бит или больше, в зависимости от P.
+            // Предыдущая ошибка "DH key size must be multiple of 64..." была связана с этим,
+            // и l=0 ее решало для стандартных размеров P.
+             Logger.info("DH P (" + clientDhP.toString() + ") имеет стандартную битовую длину (" + clientDhP.bitLength() + "). Используем l=" + lValue + " (по умолчанию) для генерации DH ключей.");
+        }
+        
+        DHParameterSpec dhParams = new DHParameterSpec(clientDhP, clientDhG, lValue);
+        KeyPairGenerator keyGen = KeyPairGenerator.getInstance("DH", "BC"); // "BC" для BouncyCastle
+        
+        SecureRandom random = SecureRandom.getInstanceStrong(); // Используем криптостойкий генератор случайных чисел
+        keyGen.initialize(dhParams, random); // Передаем SecureRandom
+        
         dhKeyPair = keyGen.generateKeyPair();
         
         saveDHKeysToPEM();
-        Logger.info("Сгенерированы новые DH ключи клиента и сохранены в формате PEM.");
+        Logger.info("Сгенерированы новые DH ключи клиента (P=" + clientDhP.toString() + ", G=" + clientDhG.toString() + ", l=" + lValue + ") и сохранены в формате PEM.");
     }
     
     /**
@@ -290,16 +331,62 @@ public class KeyManager implements AutoCloseable {
         this.dhServerPublicKeyY = serverDhY;
         Logger.info("Публичный ключ DH сервера установлен: Y_server=" + serverDhY.toString().substring(0, Math.min(10,serverDhY.toString().length())) + "...");
         
+        // Вычисляем lValue
+        int lValue = 0;
+        if (clientDhP.bitLength() < 64) { 
+            lValue = clientDhP.bitLength();
+            Logger.info("setServerDHPublicKey: DH P (" + clientDhP.toString() + ") имеет малую битовую длину (" + clientDhP.bitLength() + "). Устанавливаем l=" + lValue + " для ASN.1 структуры.");
+        } else {
+            Logger.info("setServerDHPublicKey: DH P (" + clientDhP.toString() + ") имеет стандартную битовую длину (" + clientDhP.bitLength() + "). Используем l=" + lValue + " (по умолчанию) для ASN.1 структуры.");
+        }
+
+        // 1. Создаем DHParameter ASN.1 объект (SEQUENCE { p INTEGER, g INTEGER, l INTEGER OPTIONAL })
+        ASN1EncodableVector paramsVector = new ASN1EncodableVector();
+        paramsVector.add(new ASN1Integer(clientDhP));
+        paramsVector.add(new ASN1Integer(clientDhG));
+        if (lValue > 0) { // Добавляем l только если оно было явно установлено (для малых P)
+            paramsVector.add(new ASN1Integer(lValue));
+        }
+        DERSequence dhParamsSequence = new DERSequence(paramsVector);
+
+        // 2. Создаем AlgorithmIdentifier (SEQUENCE { algorithm OBJECT IDENTIFIER, parameters DHParameter })
+        AlgorithmIdentifier algId = new AlgorithmIdentifier(PKCSObjectIdentifiers.dhKeyAgreement, dhParamsSequence);
+
+        // 3. Создаем SubjectPublicKey (Y как ASN.1 INTEGER, обернутый в DERBitString)
+        // DERInteger yValue = new DERInteger(serverDhY); // Это уже ASN1Integer
+        // byte[] publicKeyASN1Bytes = yValue.getEncoded();
+        // DERBitString subjectPublicKeyBits = new DERBitString(publicKeyASN1Bytes);
+        // Исправлено: SubjectPublicKeyInfo ожидает DERBitString, содержащий сам ключ.
+        // Для DH, ключ Y - это INTEGER. DERBitString(ASN1Integer(Y)) - неправильно.
+        // Правильно: DERBitString(bytes_of_DEREncoded_ASN1Integer_Y)
+        // Или, если ключ уже является последовательностью байт, которая должна быть в BIT STRING:
+        // DERBitString(byte[])
+        // В случае DH, public key Y является INTEGER. Этот INTEGER должен быть значением BIT STRING.
+        // Согласно RFC 5280 (для X.509), subjectPublicKey (BIT STRING) содержит DER-кодированный публичный ключ.
+        // Для DH, сам публичный ключ Y (целое число) является содержимым этого BIT STRING.
+        // Таким образом, сначала кодируем Y в ASN.1 INTEGER, затем его байты передаем в DERBitString.
+        byte[] encodedY = new ASN1Integer(serverDhY).getEncoded();
+        DERBitString subjectPublicKeyBits = new DERBitString(encodedY);
+
+        // 4. Создаем SubjectPublicKeyInfo (SEQUENCE { algorithm AlgorithmIdentifier, subjectPublicKey BIT STRING })
+        SubjectPublicKeyInfo spkInfo = new SubjectPublicKeyInfo(algId, subjectPublicKeyBits);
+
+        // 5. Получаем DER-кодированные байты SubjectPublicKeyInfo
+        byte[] encodedSpkInfo = spkInfo.getEncoded("DER"); // Явно указываем DER для SubjectPublicKeyInfo
+
+        // 6. Создаем X509EncodedKeySpec
+        X509EncodedKeySpec x509KeySpec = new X509EncodedKeySpec(encodedSpkInfo);
+
+        // 7. Используем KeyFactory
         KeyFactory keyFactory = KeyFactory.getInstance("DH", "BC");
-        DHPublicKeySpec dhPublicKeySpec = new DHPublicKeySpec(serverDhY, clientDhP, clientDhG);
-        PublicKey serverDHPublicKey = keyFactory.generatePublic(dhPublicKeySpec);
+        PublicKey serverDHPublicKey = keyFactory.generatePublic(x509KeySpec);
         
         KeyAgreement keyAgreement = KeyAgreement.getInstance("DH", "BC");
         keyAgreement.init(dhKeyPair.getPrivate());
         keyAgreement.doPhase(serverDHPublicKey, true);
         
         this.dhSharedSecret = keyAgreement.generateSecret();
-        Logger.info("Общий секрет DH успешно сгенерирован. Длина: " + (dhSharedSecret != null ? dhSharedSecret.length * 8 : "null") + " бит.");
+        Logger.info("Общий секрет DH успешно сгенерирован (через X509Spec). Длина: " + (dhSharedSecret != null ? dhSharedSecret.length * 8 : "null") + " бит.");
     }
     
     /**
