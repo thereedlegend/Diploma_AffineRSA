@@ -119,7 +119,7 @@
              <plugin>
                 <groupId>com.akathist.maven.plugins.launch4j</groupId>
                 <artifactId>launch4j-maven-plugin</artifactId>
-                <version>0.9.1.9</version> <!-- Обновлено -->
+                <version>2.5.0</version> <!-- Обновлено -->
                 <executions>
                     <execution>
                         <id>l4j-clui</id>
@@ -144,11 +144,11 @@
                             </jre>
                             <icon>src/main/resources/icons/app_icon.ico</icon> <!--Путь к иконке -->
                              <versionInfo>
-                                <fileVersion>1.0.0.0</fileVersion>
+                                <fileVersion>0.9.1.9</fileVersion>
                                 <txtFileVersion>${project.version}</txtFileVersion>
                                 <fileDescription>${project.name}</fileDescription>
                                 <copyright>EikiriKito</copyright>
-                                <productVersion>1.0.0.0</productVersion>
+                                <productVersion>0.9.1.9</productVersion>
                                 <txtProductVersion>${project.version}</txtProductVersion>
                                 <productName>RyuMessenger</productName>
                                 <companyName>TheReedLegend</companyName>
